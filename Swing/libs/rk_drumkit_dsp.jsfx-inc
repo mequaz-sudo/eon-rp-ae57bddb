@@ -1,0 +1,475 @@
+// rk_drumkit_dsp.jsfx-inc — DSP + utility functions for Swing
+// (c) EON Studios — All Rights Reserved
+//
+// Extracted from the main JSFX to keep it focused on
+// memory layout, MIDI, serialization, and GUI.
+//
+// Requires the following global arrays/variables to be allocated before import:
+//   p_attack, p_decay, p_sustain, p_release, p_tune, p_pan, p_note, p_note_lock
+//   p_att_c, p_dec_c, p_rel_c, p_panL, p_panR
+//   fx_hpf_freq, fx_lpf_freq, fx_eq_lo, fx_eq_mid, fx_eq_hi, fx_sat_drv, fx_drv_mode
+//   fx_eq_lo_freq, fx_eq_mid_freq, fx_eq_hi_freq
+//   s_sr, root_note, srate
+//   gfx_hpf_freq, gfx_lpf_freq, gfx_sat_drv
+
+@init
+
+// ─── Frequency ↔ normalized (0–1) log mapping for filter knobs ───────────
+// 0→20Hz, 0.5→632Hz, 1→20kHz  (20 * 1000^n)
+function freq_to_norm(hz) ( log10(max(20, hz) / 20.0) / 3.0; );
+function norm_to_freq(n)  ( 20.0 * pow(1000.0, max(0, min(1, n))); );
+
+// ─── HSL → RGB conversion ──────────────────────────────────────────────
+// h = hue (0–1), s = saturation (0–1), l = lightness (0–1)
+// Returns via globals: _hsl_r, _hsl_g, _hsl_b (0–1 each)
+function hsl_to_rgb(h, s, l)
+local(_c, _x, _m, _hp, _r1, _g1, _b1, _hp_mod2)
+(
+  _c = (1.0 - abs(2.0 * l - 1.0)) * s;
+  _hp = h * 6.0;
+  // Float modulo: JSFX % is integer-only, so use floor-based fmod
+  _hp_mod2 = _hp - floor(_hp * 0.5) * 2.0;
+  _x = _c * (1.0 - abs(_hp_mod2 - 1.0));
+  _r1 = 0; _g1 = 0; _b1 = 0;
+  _hp < 1 ? ( _r1 = _c; _g1 = _x; ) :
+  _hp < 2 ? ( _r1 = _x; _g1 = _c; ) :
+  _hp < 3 ? ( _g1 = _c; _b1 = _x; ) :
+  _hp < 4 ? ( _g1 = _x; _b1 = _c; ) :
+  _hp < 5 ? ( _r1 = _x; _b1 = _c; ) :
+             ( _r1 = _c; _b1 = _x; );
+  _m = l - _c * 0.5;
+  _hsl_r = _r1 + _m;
+  _hsl_g = _g1 + _m;
+  _hsl_b = _b1 + _m;
+);
+
+// ─── Velocity curve ──────────────────────────────────────────────────────
+// Takes 0–1 velocity, returns shaped 0–1 value
+function apply_vel_curve(vel, curve) (
+  curve == 1 ? vel * vel :        // soft  — need harder hits for loud
+  curve == 2 ? sqrt(vel) :        // hard  — light hits still loud
+  curve == 3 ? 1.0 :              // fixed — always full velocity
+  vel;                             // 0 = linear (default)
+);
+
+// ─── Repeat interval (samples per division at current tempo) ─────────────
+// Division map: 0=OFF, then groups of 3: straight, triplet, dotted
+// 1=1/4  2=1/4T  3=1/4D   4=1/8  5=1/8T  6=1/8D
+// 7=1/16 8=1/16T 9=1/16D  10=1/32 11=1/32T 12=1/32D
+// 13=1/64 14=1/64T 15=1/64D
+RPT_NUM_DIVS = 15;
+function get_rpt_interval(div) local(beat_samples, base) (
+  beat_samples = (60.0 / (tempo > 0 ? tempo : 120)) * srate;  // samples per quarter note
+  div == 1  ? beat_samples :                 // 1/4
+  div == 2  ? beat_samples * 2.0 / 3.0 :    // 1/4T
+  div == 3  ? beat_samples * 1.5 :           // 1/4D
+  div == 4  ? beat_samples * 0.5 :           // 1/8
+  div == 5  ? beat_samples * 0.5 * 2.0 / 3.0 : // 1/8T
+  div == 6  ? beat_samples * 0.5 * 1.5 :     // 1/8D
+  div == 7  ? beat_samples * 0.25 :          // 1/16
+  div == 8  ? beat_samples * 0.25 * 2.0 / 3.0 : // 1/16T
+  div == 9  ? beat_samples * 0.25 * 1.5 :    // 1/16D
+  div == 10 ? beat_samples * 0.125 :         // 1/32
+  div == 11 ? beat_samples * 0.125 * 2.0 / 3.0 : // 1/32T
+  div == 12 ? beat_samples * 0.125 * 1.5 :   // 1/32D
+  div == 13 ? beat_samples * 0.0625 :        // 1/64
+  div == 14 ? beat_samples * 0.0625 * 2.0 / 3.0 : // 1/64T
+  div == 15 ? beat_samples * 0.0625 * 1.5 :  // 1/64D
+  0;
+);
+
+// Get division display name into #_rpt_name
+function get_rpt_div_name(div) (
+  div == 0  ? strcpy(#_rpt_name, "OFF") :
+  div == 1  ? strcpy(#_rpt_name, "1/4") :
+  div == 2  ? strcpy(#_rpt_name, "1/4T") :
+  div == 3  ? strcpy(#_rpt_name, "1/4D") :
+  div == 4  ? strcpy(#_rpt_name, "1/8") :
+  div == 5  ? strcpy(#_rpt_name, "1/8T") :
+  div == 6  ? strcpy(#_rpt_name, "1/8D") :
+  div == 7  ? strcpy(#_rpt_name, "1/16") :
+  div == 8  ? strcpy(#_rpt_name, "1/16T") :
+  div == 9  ? strcpy(#_rpt_name, "1/16D") :
+  div == 10 ? strcpy(#_rpt_name, "1/32") :
+  div == 11 ? strcpy(#_rpt_name, "1/32T") :
+  div == 12 ? strcpy(#_rpt_name, "1/32D") :
+  div == 13 ? strcpy(#_rpt_name, "1/64") :
+  div == 14 ? strcpy(#_rpt_name, "1/64T") :
+  div == 15 ? strcpy(#_rpt_name, "1/64D") :
+  strcpy(#_rpt_name, "?");
+);
+
+// ─── DSP coefficient recalc for pad i ─────────────────────────────────────
+function recalc_pad(i) (
+  // Factor of 5.0 makes envelope reach ~99% of target within the specified time
+  p_att_c[i]  = exp(-5.0 / max(1, p_attack[i]  * 0.001 * srate));
+  p_dec_c[i]  = exp(-5.0 / max(1, p_decay[i]   * 0.001 * srate));
+  p_rel_c[i]  = exp(-5.0 / max(1, p_release[i] * 0.001 * srate));
+  p_panL[i] = 1.0 - max(0.0, p_pan[i]);
+  p_panR[i] = 1.0 + min(0.0, p_pan[i]);
+  !p_note_lock[i] ? p_note[i] = root_note + i;
+);
+
+// ─── Per-pad compressor coefficient recalc ───────────────────────────────
+// Fixed presets by mode: PUNCH(0), GLUE(1), SQUASH(2).
+// All coefficients derived from mode + srate — no per-pad tuning needed.
+function recalc_pad_comp(i)
+local(_mode, _amt, _atk_ms, _rel_ms, _ratio, _knee, _max_thresh, _thresh, _sr, _makeup_db)
+(
+  _mode = fx_cmp_mode[i] | 0;
+  _amt  = max(0, min(1, fx_cmp_amt[i]));
+  _sr = max(srate, 1);
+
+  // Mode sets character (attack/release/ratio/knee) + the threshold floor
+  // reached at amt = 1. Knob amt acts as a "drive into the compressor"
+  // control: higher amt = lower threshold = more material above threshold
+  // = more compression. This is how Sitala-style one-knob compressors work,
+  // and it lets sends handle parallel compression separately.
+  _mode == 0 ? ( // PUNCH: fast attack, short release, strong ratio
+    _atk_ms = 1; _rel_ms = 50; _ratio = 4; _knee = 3; _max_thresh = -30;
+  ) :
+  _mode == 1 ? ( // GLUE: slow attack, medium release, light ratio
+    _atk_ms = 30; _rel_ms = 150; _ratio = 2; _knee = 6; _max_thresh = -24;
+  ) : ( // SQUASH: medium attack, long release, heavy ratio
+    _atk_ms = 10; _rel_ms = 300; _ratio = 8; _knee = 2; _max_thresh = -40;
+  );
+
+  // Threshold scales with amount: 0 dB at amt=0 (effectively off — no signal
+  // exceeds 0 dBFS), mode-defined floor at amt=1. Linear in dB.
+  _thresh = _max_thresh * _amt;
+
+  fx_cmp_at_c[i]      = exp(-1 / (_sr * _atk_ms * 0.001));
+  fx_cmp_rel_c[i]     = exp(-1 / (_sr * _rel_ms * 0.001));
+  fx_cmp_inv_ratio[i] = 1 / max(_ratio, 1.0001);
+  fx_cmp_thresh[i]    = _thresh;
+  fx_cmp_knee_lo[i]   = _thresh - _knee * 0.5;
+  fx_cmp_knee_hi[i]   = _thresh + _knee * 0.5;
+  fx_cmp_knee_inv[i]  = _knee > 0 ? 1 / (2 * _knee) : 0;
+  fx_cmp_knee_lo_lin[i] = exp((_thresh - _knee * 0.5) * 0.11512925465);
+
+  // Auto-makeup: 1/4 of theoretical max GR at threshold (was 1/2 — too
+  // aggressive, masked the compression effect by boosting everything). At
+  // 1/4 the makeup partially compensates for level loss but leaves the
+  // compression audibly present. User can use master gain or sends for
+  // parallel/wet level control.
+  _makeup_db = -_thresh * (1 - 1 / _ratio) * 0.25;
+  fx_cmp_makeup_lin[i] = exp(_makeup_db * 0.11512925465);
+);
+
+// ─── Per-pad FX coefficient recalc ──────────────────────────────────────
+function recalc_fx(i) local(_bq_base) (
+  // Bitcrush: precompute quantization levels (avoid per-sample pow())
+  fx_bc_lvl[i] = pow(2, max(1, min(16, fx_bc_bits[i] | 0)) - 1);
+
+  // ── Biquad filter coefficient update ──
+  _bq_base = bq_pad + i * BQ_PER_PAD * BQ_STEREO_SIZE;
+  // HPF: 2nd-order highpass (Q from per-pad resonance knob)
+  fx_hpf_freq[i] > 25 ?
+    bq_set_highpass(_bq_base + BQ_PAD_HPF * BQ_STEREO_SIZE, fx_hpf_freq[i], fx_reso[i])
+  : (
+    // Passthrough: set b0=1, rest=0
+    _bq_base[BQ_PAD_HPF * BQ_STEREO_SIZE + BQ_B0] = 1;
+    _bq_base[BQ_PAD_HPF * BQ_STEREO_SIZE + BQ_B1] = 0;
+    _bq_base[BQ_PAD_HPF * BQ_STEREO_SIZE + BQ_B2] = 0;
+    _bq_base[BQ_PAD_HPF * BQ_STEREO_SIZE + BQ_A1] = 0;
+    _bq_base[BQ_PAD_HPF * BQ_STEREO_SIZE + BQ_A2] = 0;
+    // Clear one-pole state so bypassed filter doesn't block pad sleep
+    fx_hpf_stL[i] = 0; fx_hpf_stR[i] = 0;
+  );
+  // LPF: 2nd-order lowpass (Q from per-pad resonance knob)
+  fx_lpf_freq[i] < 19500 ?
+    bq_set_lowpass(_bq_base + BQ_PAD_LPF * BQ_STEREO_SIZE, fx_lpf_freq[i], fx_reso[i])
+  : (
+    _bq_base[BQ_PAD_LPF * BQ_STEREO_SIZE + BQ_B0] = 1;
+    _bq_base[BQ_PAD_LPF * BQ_STEREO_SIZE + BQ_B1] = 0;
+    _bq_base[BQ_PAD_LPF * BQ_STEREO_SIZE + BQ_B2] = 0;
+    _bq_base[BQ_PAD_LPF * BQ_STEREO_SIZE + BQ_A1] = 0;
+    _bq_base[BQ_PAD_LPF * BQ_STEREO_SIZE + BQ_A2] = 0;
+    fx_lpf_stL[i] = 0; fx_lpf_stR[i] = 0;
+  );
+  // Low shelf: frequency from fx_eq_lo_freq[i], slope 1.0
+  bq_set_lowshelf(_bq_base + BQ_PAD_LO * BQ_STEREO_SIZE, fx_eq_lo_freq[i], fx_eq_lo[i], 1.0);
+  // Mid peaking: frequency from fx_eq_mid_freq[i], Q=0.8
+  bq_set_peaking(_bq_base + BQ_PAD_MID * BQ_STEREO_SIZE, fx_eq_mid_freq[i], fx_eq_mid[i], 0.8);
+  // High shelf: frequency from fx_eq_hi_freq[i], slope 1.0
+  bq_set_highshelf(_bq_base + BQ_PAD_HI * BQ_STEREO_SIZE, fx_eq_hi_freq[i], fx_eq_hi[i], 1.0);
+
+  // Per-pad compressor coefficients (mode-dependent)
+  recalc_pad_comp(i);
+);
+
+// ─── Drive mode processing (per-sample, called from @sample FX chain) ──
+// Takes pre-driven stereo pair (already multiplied by 8x drive gain),
+// applies selected curve, returns via _doL/_doR.
+// mode: 0=SOFT, 1=TUBE, 2=TAPE, 3=FUZZ, 4=CLIP
+// All curves are normalized so unity-in ≈ unity-out at moderate drive.
+function drive_process(xL, xR, mode)
+local(_x2L, _x2R, _absL, _absR)
+(
+  mode == 0 ? (
+    // SOFT — rational tanh: x*(27+x²)/(27+9x²)
+    _x2L = xL * xL; _x2R = xR * xR;
+    _doL = xL * (27.0 + _x2L) / (27.0 + 9.0 * _x2L);
+    _doR = xR * (27.0 + _x2R) / (27.0 + 9.0 * _x2R);
+  ) :
+  mode == 1 ? (
+    // TUBE — asymmetric soft clip (even harmonics, warm 2nd-order character)
+    // Positive half: softer, negative half: harder compression
+    _absL = abs(xL); _absR = abs(xR);
+    _doL = xL >= 0
+      ? xL / (1.0 + _absL)                          // gentle positive
+      : xL / (1.0 + _absL * _absL * 0.6);           // squashed negative
+    _doR = xR >= 0
+      ? xR / (1.0 + _absR)
+      : xR / (1.0 + _absR * _absR * 0.6);
+    // Slight DC offset characteristic of real tubes — removed by HPF downstream
+    _doL *= 1.2; _doR *= 1.2;
+  ) :
+  mode == 2 ? (
+    // TAPE — smooth cubic-ish saturation with gentle knee + soft limiting
+    // Emulates magnetic hysteresis compression on transients
+    _doL = xL > 1.0  ?  0.6667 + (xL - 1.0) / (1.0 + (xL - 1.0) * 3.0) * 0.3333
+         : xL < -1.0 ? -0.6667 - (-xL - 1.0) / (1.0 + (-xL - 1.0) * 3.0) * 0.3333
+         : xL - xL * xL * xL / 3.0;
+    _doR = xR > 1.0  ?  0.6667 + (xR - 1.0) / (1.0 + (xR - 1.0) * 3.0) * 0.3333
+         : xR < -1.0 ? -0.6667 - (-xR - 1.0) / (1.0 + (-xR - 1.0) * 3.0) * 0.3333
+         : xR - xR * xR * xR / 3.0;
+    // Tape tends to glue — slightly reduce output for natural compression feel
+    _doL *= 1.15; _doR *= 1.15;
+  ) :
+  mode == 3 ? (
+    // FUZZ — hard asymmetric clip with bias, gnarly transistor breakup
+    // Adds odd + even harmonics, heavy coloring for aggressive drum sounds
+    _doL = max(-0.7, min(1.0, xL * 1.3 + 0.1));
+    _doR = max(-0.7, min(1.0, xR * 1.3 + 0.1));
+    // Remove bias DC
+    _doL -= 0.1; _doR -= 0.1;
+  ) :
+  (
+    // CLIP — hard digital brick-wall, clean and punchy
+    _doL = max(-1.0, min(1.0, xL));
+    _doR = max(-1.0, min(1.0, xR));
+  );
+);
+
+// ─── Unified master chain recalc (HPF + LPF + EQ + sat) ─────────────────
+// Single function eliminates any state desync between EQ and HPF/LPF/sat.
+// Called from all paths: UI drags, @slider, preset load, srate change, etc.
+function recalc_global_fx() local(_bm) (
+  // ── Master biquad filters (audio only — curve computes its own) ──
+  _bm = bq_master;
+  // HPF
+  gfx_hpf_freq > 25 ?
+    bq_set_highpass(_bm + BQ_MST_HPF * BQ_STEREO_SIZE, gfx_hpf_freq, 0.707)
+  : (
+    _bm[BQ_MST_HPF * BQ_STEREO_SIZE + BQ_B0] = 1;
+    _bm[BQ_MST_HPF * BQ_STEREO_SIZE + BQ_B1] = 0;
+    _bm[BQ_MST_HPF * BQ_STEREO_SIZE + BQ_B2] = 0;
+    _bm[BQ_MST_HPF * BQ_STEREO_SIZE + BQ_A1] = 0;
+    _bm[BQ_MST_HPF * BQ_STEREO_SIZE + BQ_A2] = 0;
+  );
+  // LPF
+  gfx_lpf_freq < 19500 ?
+    bq_set_lowpass(_bm + BQ_MST_LPF * BQ_STEREO_SIZE, gfx_lpf_freq, 0.707)
+  : (
+    _bm[BQ_MST_LPF * BQ_STEREO_SIZE + BQ_B0] = 1;
+    _bm[BQ_MST_LPF * BQ_STEREO_SIZE + BQ_B1] = 0;
+    _bm[BQ_MST_LPF * BQ_STEREO_SIZE + BQ_B2] = 0;
+    _bm[BQ_MST_LPF * BQ_STEREO_SIZE + BQ_A1] = 0;
+    _bm[BQ_MST_LPF * BQ_STEREO_SIZE + BQ_A2] = 0;
+  );
+  // EQ bands — NO ternary, flat if-blocks to avoid JSFX parse ambiguity
+  meq_lo_bell == 0 ? (
+    bq_set_lowshelf(_bm + BQ_MST_LO * BQ_STEREO_SIZE, gfx_eq_lo_freq, gfx_eq_lo, 1.0);
+  );
+  meq_lo_bell != 0 ? (
+    bq_set_peaking(_bm + BQ_MST_LO * BQ_STEREO_SIZE, gfx_eq_lo_freq, gfx_eq_lo, 0.8);
+  );
+  bq_set_peaking(_bm + BQ_MST_MID * BQ_STEREO_SIZE, gfx_eq_mid_freq, gfx_eq_mid, 0.8);
+  meq_hi_bell == 0 ? (
+    bq_set_highshelf(_bm + BQ_MST_HI * BQ_STEREO_SIZE, gfx_eq_hi_freq, gfx_eq_hi, 1.0);
+  );
+  meq_hi_bell != 0 ? (
+    bq_set_peaking(_bm + BQ_MST_HI * BQ_STEREO_SIZE, gfx_eq_hi_freq, gfx_eq_hi, 0.8);
+  );
+);
+
+function recalc_master_eq() ( recalc_global_fx(); );
+
+// ─── Check if pad has any audio loaded ─────────────────────────────────────
+function pad_has_audio(i) local(li) (
+  s_len[i] > 0 ? 1 : (
+    p_layer_cnt[i] > 0 ? (
+      li = 0;
+      while(li < p_layer_cnt[i] && l_len[i * MAX_LAYERS + li] <= 0) ( li += 1; );
+      li < p_layer_cnt[i];
+    ) : 0;
+  );
+);
+
+// ─── Get effective sample length for a pad (first available layer or legacy) ─
+function pad_eff_len(i) local(li, _lidx) (
+  p_layer_cnt[i] > 0 ? (
+    li = 0;
+    while(li < p_layer_cnt[i]) (
+      _lidx = i * MAX_LAYERS + li;
+      l_len[_lidx] > 0 ? ( li = p_layer_cnt[i] + 1; ); // break
+      li += 1;
+    );
+    li > p_layer_cnt[i] ? l_len[_lidx] : 0;
+  ) : s_len[i];
+);
+
+// ─── Swap two pads (all metadata, FX, layers, audio) ─────────────────────
+function swap_pads(a, b)
+  local(tmp, li, la, lb, j, _swap_len_a, _swap_len_b, _swap_len)
+(
+  a == b ? 0 : (
+    // Helper macro-style: swap scalar array values
+    // ── Sample metadata ──
+    tmp = s_len[a]; s_len[a] = s_len[b]; s_len[b] = tmp;
+    tmp = s_start[a]; s_start[a] = s_start[b]; s_start[b] = tmp;
+    tmp = s_end[a]; s_end[a] = s_end[b]; s_end[b] = tmp;
+    tmp = s_skip[a]; s_skip[a] = s_skip[b]; s_skip[b] = tmp;
+    tmp = s_norm[a]; s_norm[a] = s_norm[b]; s_norm[b] = tmp;
+    tmp = s_norm_gain[a]; s_norm_gain[a] = s_norm_gain[b]; s_norm_gain[b] = tmp;
+    tmp = s_sr[a]; s_sr[a] = s_sr[b]; s_sr[b] = tmp;
+    s_dirty[a] = 1; s_dirty[b] = 1;
+
+    // ── Pad params ──
+    tmp = p_gain[a]; p_gain[a] = p_gain[b]; p_gain[b] = tmp;
+    tmp = p_pan[a]; p_pan[a] = p_pan[b]; p_pan[b] = tmp;
+    tmp = p_attack[a]; p_attack[a] = p_attack[b]; p_attack[b] = tmp;
+    tmp = p_decay[a]; p_decay[a] = p_decay[b]; p_decay[b] = tmp;
+    tmp = p_sustain[a]; p_sustain[a] = p_sustain[b]; p_sustain[b] = tmp;
+    tmp = p_release[a]; p_release[a] = p_release[b]; p_release[b] = tmp;
+    tmp = p_tune[a]; p_tune[a] = p_tune[b]; p_tune[b] = tmp;
+    tmp = p_note[a]; p_note[a] = p_note[b]; p_note[b] = tmp;
+    tmp = p_note_lock[a]; p_note_lock[a] = p_note_lock[b]; p_note_lock[b] = tmp;
+    tmp = p_color[a]; p_color[a] = p_color[b]; p_color[b] = tmp; col_dirty = 1;
+    tmp = p_mute[a]; p_mute[a] = p_mute[b]; p_mute[b] = tmp;
+    tmp = p_solo[a]; p_solo[a] = p_solo[b]; p_solo[b] = tmp;
+    tmp = p_choke[a]; p_choke[a] = p_choke[b]; p_choke[b] = tmp;
+    tmp = p_oneshot[a]; p_oneshot[a] = p_oneshot[b]; p_oneshot[b] = tmp;
+    tmp = p_reverse[a]; p_reverse[a] = p_reverse[b]; p_reverse[b] = tmp;
+    tmp = p_swapLR[a];  p_swapLR[a]  = p_swapLR[b];  p_swapLR[b]  = tmp;
+    tmp = p_output[a]; p_output[a] = p_output[b]; p_output[b] = tmp;
+    // ── FX params ──
+    tmp = fx_hpf_freq[a]; fx_hpf_freq[a] = fx_hpf_freq[b]; fx_hpf_freq[b] = tmp;
+    tmp = fx_lpf_freq[a]; fx_lpf_freq[a] = fx_lpf_freq[b]; fx_lpf_freq[b] = tmp;
+    tmp = fx_eq_lo[a]; fx_eq_lo[a] = fx_eq_lo[b]; fx_eq_lo[b] = tmp;
+    tmp = fx_eq_mid[a]; fx_eq_mid[a] = fx_eq_mid[b]; fx_eq_mid[b] = tmp;
+    tmp = fx_eq_hi[a]; fx_eq_hi[a] = fx_eq_hi[b]; fx_eq_hi[b] = tmp;
+    tmp = fx_eq_lo_freq[a]; fx_eq_lo_freq[a] = fx_eq_lo_freq[b]; fx_eq_lo_freq[b] = tmp;
+    tmp = fx_eq_mid_freq[a]; fx_eq_mid_freq[a] = fx_eq_mid_freq[b]; fx_eq_mid_freq[b] = tmp;
+    tmp = fx_eq_hi_freq[a]; fx_eq_hi_freq[a] = fx_eq_hi_freq[b]; fx_eq_hi_freq[b] = tmp;
+    tmp = fx_sat_drv[a]; fx_sat_drv[a] = fx_sat_drv[b]; fx_sat_drv[b] = tmp;
+    tmp = fx_drv_mode[a]; fx_drv_mode[a] = fx_drv_mode[b]; fx_drv_mode[b] = tmp;
+    tmp = fx_bc_rate[a]; fx_bc_rate[a] = fx_bc_rate[b]; fx_bc_rate[b] = tmp;
+    tmp = fx_bc_bits[a]; fx_bc_bits[a] = fx_bc_bits[b]; fx_bc_bits[b] = tmp;
+    tmp = fx_snd_dly[a]; fx_snd_dly[a] = fx_snd_dly[b]; fx_snd_dly[b] = tmp;
+    tmp = fx_snd_rvb[a]; fx_snd_rvb[a] = fx_snd_rvb[b]; fx_snd_rvb[b] = tmp;
+
+    // ── Layer + repeat data ──
+    tmp = p_layer_cnt[a]; p_layer_cnt[a] = p_layer_cnt[b]; p_layer_cnt[b] = tmp;
+    tmp = p_layer_mode[a]; p_layer_mode[a] = p_layer_mode[b]; p_layer_mode[b] = tmp;
+    tmp = p_rr_idx[a]; p_rr_idx[a] = p_rr_idx[b]; p_rr_idx[b] = tmp;
+    tmp = p_sum_tight[a]; p_sum_tight[a] = p_sum_tight[b]; p_sum_tight[b] = tmp;
+    tmp = p_rpt_div[a]; p_rpt_div[a] = p_rpt_div[b]; p_rpt_div[b] = tmp;
+    tmp = p_sample_offset[a]; p_sample_offset[a] = p_sample_offset[b]; p_sample_offset[b] = tmp;
+    li = 0;
+    loop(MAX_LAYERS,
+      la = a * MAX_LAYERS + li;
+      lb = b * MAX_LAYERS + li;
+      tmp = l_len[la]; l_len[la] = l_len[lb]; l_len[lb] = tmp;
+      tmp = l_start[la]; l_start[la] = l_start[lb]; l_start[lb] = tmp;
+      tmp = l_end[la]; l_end[la] = l_end[lb]; l_end[lb] = tmp;
+      tmp = l_norm[la]; l_norm[la] = l_norm[lb]; l_norm[lb] = tmp;
+      tmp = l_norm_gain[la]; l_norm_gain[la] = l_norm_gain[lb]; l_norm_gain[lb] = tmp;
+      tmp = l_vel_lo[la]; l_vel_lo[la] = l_vel_lo[lb]; l_vel_lo[lb] = tmp;
+      tmp = l_vel_hi[la]; l_vel_hi[la] = l_vel_hi[lb]; l_vel_hi[lb] = tmp;
+      tmp = l_rr_order[la]; l_rr_order[la] = l_rr_order[lb]; l_rr_order[lb] = tmp;
+      tmp = l_sr[la]; l_sr[la] = l_sr[lb]; l_sr[lb] = tmp;
+      tmp = l_gain[la]; l_gain[la] = l_gain[lb]; l_gain[lb] = tmp;
+      li += 1;
+    );
+
+    // ── Audio buffer swap (interleaved stereo, SLOT_SIZE per pad) ──
+    // Only swap the used portions to avoid moving 4M zeros
+    _swap_len_a = max(s_len[a], pad_eff_len(a)) * 2 + 64;  // stereo interleaved + safety margin
+    _swap_len_b = max(s_len[b], pad_eff_len(b)) * 2 + 64;
+    _swap_len = max(_swap_len_a, _swap_len_b);
+    _swap_len = min(_swap_len, SLOT_SIZE);  // clamp
+    _swap_len > 0 ? (
+      // Use _swap_tmp_buf (allocated after send FX memory) for temp storage
+      memcpy(_swap_tmp_buf, s_audio_start + a * SLOT_SIZE, _swap_len);
+      memcpy(s_audio_start + a * SLOT_SIZE, s_audio_start + b * SLOT_SIZE, _swap_len);
+      memcpy(s_audio_start + b * SLOT_SIZE, _swap_tmp_buf, _swap_len);
+    );
+
+    // NOTE: pad name strings must be swapped by caller (get_cname_slot defined in main file)
+
+    // Recalculate derived values
+    recalc_pad(a); recalc_pad(b);
+    recalc_fx(a); recalc_fx(b);
+  );
+);
+
+// ─── Layer selection for voice launch ──────────────────────────────────────
+// Returns layer index (0–MAX_LAYERS-1) based on mode and velocity
+// vel = 0.0–1.0, mode: 0=single, 1=vel-split, 2=round-robin, 3=sum (handled externally)
+// For mode=3 (sum), caller loops all layers — this function is not called.
+function select_layer(pad, vel, mode) local(cnt, li, fi, _base, best, _oidx) (
+  cnt = p_layer_cnt[pad];
+  cnt <= 1 ? 0 : (
+    mode == 1 ? (  // velocity split: use per-layer vel_lo/vel_hi ranges
+      best = -1; li = 0;
+      while(li < cnt) (
+        _base = pad * MAX_LAYERS + li;
+        vel >= l_vel_lo[_base] && (vel < l_vel_hi[_base] || l_vel_hi[_base] >= 1.0) && l_len[_base] > 0 ? (
+          best = li; li = cnt; // found — break
+        );
+        li += 1;
+      );
+      // Fallback: if no range matched, find nearest layer with audio
+      best < 0 ? (
+        fi = 0;
+        while(fi < cnt && l_len[pad * MAX_LAYERS + fi] <= 0) ( fi += 1; );
+        fi < cnt ? best = fi : best = 0;
+      );
+      best;
+    ) :
+    mode == 2 ? (  // round-robin: follow l_rr_order sequence
+      // p_rr_idx tracks position in the order sequence (0, 1, 2, ...)
+      _oidx = p_rr_idx[pad] % cnt;
+      p_rr_idx[pad] = (_oidx + 1) % cnt;
+      // Find the layer whose rr_order == _oidx
+      best = -1; li = 0;
+      while(li < cnt) (
+        _base = pad * MAX_LAYERS + li;
+        l_rr_order[_base] == _oidx && l_len[_base] > 0 ? (
+          best = li; li = cnt; // break
+        );
+        li += 1;
+      );
+      // Fallback: just use _oidx directly if order lookup fails
+      best < 0 ? (
+        best = _oidx;
+        // Skip empty
+        fi = 0;
+        while(fi < cnt && l_len[pad * MAX_LAYERS + best] <= 0) (
+          best = (best + 1) % cnt;
+          fi += 1;
+        );
+      );
+      best;
+    ) :
+    (  // single (mode 0) — first layer with audio (prefer layer 0)
+      l_len[pad * MAX_LAYERS] > 0 ? 0 : (
+        fi = 1;
+        while(fi < cnt && l_len[pad * MAX_LAYERS + fi] <= 0) ( fi += 1; );
+        fi < cnt ? fi : 0;
+      );
+    );
+  );
+);

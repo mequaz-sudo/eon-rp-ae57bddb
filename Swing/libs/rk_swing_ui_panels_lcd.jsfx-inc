@@ -1,0 +1,934 @@
+// rk_swing_ui_panels_lcd.jsfx-inc
+// Swing LCD pages: EQ visualizer, Delay, Reverb, Compressor
+// Extracted from rk_swing_ui_panels.jsfx-inc — zero behavioral change
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function swing_panels_draw_eq() (
+    // 0dB center line
+    gfx_set(lcd_tx_r * 0.3, lcd_tx_g * 0.3, lcd_tx_b * 0.3, 0.5);
+    gfx_line(_lcd_cx, _lcd_mid_y, _lcd_cx + _lcd_cw, _lcd_mid_y);
+    // ±6dB reference lines
+    _lcd_6db = _lcd_ch * 0.25;
+    gfx_set(lcd_tx_r * 0.15, lcd_tx_g * 0.15, lcd_tx_b * 0.15, 0.4);
+    gfx_line(_lcd_cx, _lcd_mid_y - _lcd_6db, _lcd_cx + _lcd_cw, _lcd_mid_y - _lcd_6db);
+    gfx_line(_lcd_cx, _lcd_mid_y + _lcd_6db, _lcd_cx + _lcd_cw, _lcd_mid_y + _lcd_6db);
+    // Freq labels
+    gfx_setfont(1, "Arial", 9, 0);
+    gfx_set(lcd_tx_r * 0.55, lcd_tx_g * 0.55, lcd_tx_b * 0.55, 0.7);
+    _lcd_log_lo = 1.301; _lcd_log_range = 3.0;
+    _rf100 = _lcd_cx + (log10(100) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    _rf1k  = _lcd_cx + (log10(1000) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    _rf10k = _lcd_cx + (log10(10000) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    gfx_x = _rf100; gfx_y = _lcd_cy + _lcd_ch - 9; gfx_drawstr("100");
+    gfx_x = _rf1k;  gfx_y = _lcd_cy + _lcd_ch - 9; gfx_drawstr("1k");
+    gfx_x = _rf10k; gfx_y = _lcd_cy + _lcd_ch - 9; gfx_drawstr("10k");
+    // dB labels
+    gfx_set(lcd_tx_r * 0.5, lcd_tx_g * 0.5, lcd_tx_b * 0.5, 0.6);
+    gfx_x = _lcd_cx + 1; gfx_y = _lcd_mid_y - _lcd_6db - 4; gfx_drawstr("+6");
+    gfx_x = _lcd_cx + 1; gfx_y = _lcd_mid_y + _lcd_6db - 4; gfx_drawstr("-6");
+
+    // ── Process EQ node drags BEFORE drawing curve (avoid 1-frame lag) ──
+    active_id == 230 ? ( LMB ? (
+      // Clamp mouse to graph area
+      _cmx = max(_lcd_cx, min(_lcd_cx + _lcd_cw, mx));
+      _cmy = max(_lcd_cy, min(_lcd_cy + _lcd_ch, my));
+      gfx_eq_lo = max(-12, min(12, meq_drag_val_lo - (_cmy - meq_drag_my) / (_lcd_ch / 2 - 4) * 12));
+      // Delta-based freq in log space
+      _dx = _cmx - meq_drag_mx;
+      _logf = log10(meq_drag_freq_lo) + (_dx / _lcd_cw) * _lcd_log_range;
+      gfx_eq_lo_freq = max(40, min(500, pow(10, _logf)));
+      recalc_master_eq(); mark_dirty();
+    ) : active_id = -1; );
+    active_id == 231 ? ( LMB ? (
+      _cmx = max(_lcd_cx, min(_lcd_cx + _lcd_cw, mx));
+      _cmy = max(_lcd_cy, min(_lcd_cy + _lcd_ch, my));
+      gfx_eq_mid = max(-12, min(12, meq_drag_val_md - (_cmy - meq_drag_my) / (_lcd_ch / 2 - 4) * 12));
+      _dx = _cmx - meq_drag_mx;
+      _logf = log10(meq_drag_freq_md) + (_dx / _lcd_cw) * _lcd_log_range;
+      gfx_eq_mid_freq = max(200, min(8000, pow(10, _logf)));
+      recalc_master_eq(); mark_dirty();
+    ) : active_id = -1; );
+    active_id == 232 ? ( LMB ? (
+      _cmx = max(_lcd_cx, min(_lcd_cx + _lcd_cw, mx));
+      _cmy = max(_lcd_cy, min(_lcd_cy + _lcd_ch, my));
+      gfx_eq_hi = max(-12, min(12, meq_drag_val_hi - (_cmy - meq_drag_my) / (_lcd_ch / 2 - 4) * 12));
+      _dx = _cmx - meq_drag_mx;
+      _logf = log10(meq_drag_freq_hi) + (_dx / _lcd_cw) * _lcd_log_range;
+      gfx_eq_hi_freq = max(2000, min(16000, pow(10, _logf)));
+      recalc_master_eq(); mark_dirty();
+    ) : active_id = -1; );
+
+    // Draw combined frequency response curve
+    // Pre-compute all biquad coefficients ONCE (not 80x per frame)
+    _lcd_prev_x = -1; _lcd_prev_y = -1;
+    _lcd_yr = _lcd_ch / 2 - 4;
+
+    // HPF coefficients
+    _cv_hpf_on = gfx_hpf_freq > 25;
+    _cv_hpf_on ? (
+      bq_calc_highpass(gfx_hpf_freq, 0.707);
+      _hpf_b0 = _tb0; _hpf_b1 = _tb1; _hpf_b2 = _tb2;
+      _hpf_a1 = _ta1; _hpf_a2 = _ta2;
+    );
+    // LPF coefficients
+    _cv_lpf_on = gfx_lpf_freq < 19500;
+    _cv_lpf_on ? (
+      bq_calc_lowpass(gfx_lpf_freq, 0.707);
+      _lpf_b0 = _tb0; _lpf_b1 = _tb1; _lpf_b2 = _tb2;
+      _lpf_a1 = _ta1; _lpf_a2 = _ta2;
+    );
+    // Lo band coefficients — NO ternary, fully flat if-blocks
+    _cv_lo_on = gfx_eq_lo != 0;
+    _lo_use_shelf = _cv_lo_on && (meq_lo_bell == 0);
+    _lo_use_bell  = _cv_lo_on && (meq_lo_bell != 0);
+    _lo_use_shelf ? (
+      bq_calc_lowshelf(gfx_eq_lo_freq, gfx_eq_lo, 1.0);
+      _lo_b0 = _tb0; _lo_b1 = _tb1; _lo_b2 = _tb2;
+      _lo_a1 = _ta1; _lo_a2 = _ta2;
+    );
+    _lo_use_bell ? (
+      bq_calc_peaking(gfx_eq_lo_freq, gfx_eq_lo, 0.8);
+      _lo_b0 = _tb0; _lo_b1 = _tb1; _lo_b2 = _tb2;
+      _lo_a1 = _ta1; _lo_a2 = _ta2;
+    );
+    // Mid band coefficients
+    _cv_md_on = gfx_eq_mid != 0;
+    _cv_md_on ? (
+      bq_calc_peaking(gfx_eq_mid_freq, gfx_eq_mid, 0.8);
+      _md_b0 = _tb0; _md_b1 = _tb1; _md_b2 = _tb2;
+      _md_a1 = _ta1; _md_a2 = _ta2;
+    );
+    // Hi band coefficients — NO ternary, fully flat if-blocks
+    _cv_hi_on = gfx_eq_hi != 0;
+    _hi_use_shelf = _cv_hi_on && (meq_hi_bell == 0);
+    _hi_use_bell  = _cv_hi_on && (meq_hi_bell != 0);
+    _hi_use_shelf ? (
+      bq_calc_highshelf(gfx_eq_hi_freq, gfx_eq_hi, 1.0);
+      _hi_b0 = _tb0; _hi_b1 = _tb1; _hi_b2 = _tb2;
+      _hi_a1 = _ta1; _hi_a2 = _ta2;
+    );
+    _hi_use_bell ? (
+      bq_calc_peaking(gfx_eq_hi_freq, gfx_eq_hi, 0.8);
+      _hi_b0 = _tb0; _hi_b1 = _tb1; _hi_b2 = _tb2;
+      _hi_a1 = _ta1; _hi_a2 = _ta2;
+    );
+
+    // Sweep 80 frequency points — loop body is trivial (just mag lookups)
+    _lcd_px = 0;
+    loop(80,
+      _lcd_f = pow(10, _lcd_log_lo + (_lcd_px / 79) * _lcd_log_range);
+      _lcd_f = min(20000, _lcd_f);
+      _lcd_db = 0;
+      _cv_hpf_on ? ( _lcd_db += bq_mag_db(_lcd_f, _hpf_b0, _hpf_b1, _hpf_b2, _hpf_a1, _hpf_a2); );
+      _cv_lpf_on ? ( _lcd_db += bq_mag_db(_lcd_f, _lpf_b0, _lpf_b1, _lpf_b2, _lpf_a1, _lpf_a2); );
+      _cv_lo_on  ? ( _lcd_db += bq_mag_db(_lcd_f, _lo_b0, _lo_b1, _lo_b2, _lo_a1, _lo_a2); );
+      _cv_md_on  ? ( _lcd_db += bq_mag_db(_lcd_f, _md_b0, _md_b1, _md_b2, _md_a1, _md_a2); );
+      _cv_hi_on  ? ( _lcd_db += bq_mag_db(_lcd_f, _hi_b0, _hi_b1, _hi_b2, _hi_a1, _hi_a2); );
+      _lcd_db = max(-18, min(18, _lcd_db));
+      _lcd_cur_x = _lcd_cx + (_lcd_px / 79) * _lcd_cw;
+      _lcd_cur_y = _lcd_mid_y - (_lcd_db / 14) * _lcd_yr;
+
+      _lcd_prev_x >= 0 ? (
+        // Fill
+        _lcd_fy1 = min(_lcd_mid_y, _lcd_cur_y);
+        _lcd_fy2 = max(_lcd_mid_y, _lcd_cur_y);
+        _lcd_fy2 - _lcd_fy1 > 0 ? (
+          gfx_set(lcd_tx_r * 0.2, lcd_tx_g * 0.2, lcd_tx_b * 0.2, 0.2);
+          gfx_rect(_lcd_cur_x, _lcd_fy1, 1, _lcd_fy2 - _lcd_fy1);
+        );
+        // Combined line
+        gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+        gfx_line(_lcd_prev_x, _lcd_prev_y, _lcd_cur_x, _lcd_cur_y);
+      );
+      _lcd_prev_x = _lcd_cur_x;
+      _lcd_prev_y = _lcd_cur_y;
+      _lcd_px += 1;
+    );
+
+    // Draggable EQ nodes (larger in LCD, with frequency+gain X+Y drag)
+    _lcd_nr = 6;
+    // Node positions: X from frequency (log scale), Y from actual biquad magnitude
+    // Nodes sit ON the curve line — for shelves the turnover freq shows ~half the set gain (correct)
+    _lcd_lo_nx = _lcd_cx + (log10(gfx_eq_lo_freq) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    _lcd_md_nx = _lcd_cx + (log10(gfx_eq_mid_freq) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    _lcd_hi_nx = _lcd_cx + (log10(gfx_eq_hi_freq) - _lcd_log_lo) / _lcd_log_range * _lcd_cw;
+    // Lo node Y — use precomputed coefficients to get real magnitude at node freq
+    _cv_lo_on ? (
+      _lcd_lo_db = bq_mag_db(gfx_eq_lo_freq, _lo_b0, _lo_b1, _lo_b2, _lo_a1, _lo_a2);
+      _lcd_lo_db = max(-18, min(18, _lcd_lo_db));
+      _lcd_lo_ny = _lcd_mid_y - (_lcd_lo_db / 14.0) * _lcd_yr;
+    ) : (
+      _lcd_lo_ny = _lcd_mid_y;
+    );
+    // Mid node Y — peaking: magnitude at center freq ≈ gain, but use real value for consistency
+    _cv_md_on ? (
+      _lcd_md_db = bq_mag_db(gfx_eq_mid_freq, _md_b0, _md_b1, _md_b2, _md_a1, _md_a2);
+      _lcd_md_db = max(-18, min(18, _lcd_md_db));
+      _lcd_md_ny = _lcd_mid_y - (_lcd_md_db / 14.0) * _lcd_yr;
+    ) : (
+      _lcd_md_ny = _lcd_mid_y;
+    );
+    // Hi node Y — same approach for shelf/bell
+    _cv_hi_on ? (
+      _lcd_hi_db = bq_mag_db(gfx_eq_hi_freq, _hi_b0, _hi_b1, _hi_b2, _hi_a1, _hi_a2);
+      _lcd_hi_db = max(-18, min(18, _lcd_hi_db));
+      _lcd_hi_ny = _lcd_mid_y - (_lcd_hi_db / 14.0) * _lcd_yr;
+    ) : (
+      _lcd_hi_ny = _lcd_mid_y;
+    );
+
+    // Node circles
+    gfx_set(0.85, 0.65, 0.20, 1); gfx_circle(_lcd_lo_nx, _lcd_lo_ny, _lcd_nr, 1);
+    gfx_set(0, 0, 0, 0.4); gfx_circle(_lcd_lo_nx, _lcd_lo_ny, _lcd_nr, 0);
+    gfx_set(0.70, 0.85, 0.30, 1); gfx_circle(_lcd_md_nx, _lcd_md_ny, _lcd_nr, 1);
+    gfx_set(0, 0, 0, 0.4); gfx_circle(_lcd_md_nx, _lcd_md_ny, _lcd_nr, 0);
+    gfx_set(0.30, 0.70, 0.85, 1); gfx_circle(_lcd_hi_nx, _lcd_hi_ny, _lcd_nr, 1);
+    gfx_set(0, 0, 0, 0.4); gfx_circle(_lcd_hi_nx, _lcd_hi_ny, _lcd_nr, 0);
+
+    // Node hover tooltips — independent of click state
+    dist(mx, my, _lcd_lo_nx, _lcd_lo_ny) <= _lcd_nr + 5 ? swing_tooltip_check(1100, "Low band EQ node — drag Y for gain (-12 to +12 dB), drag X for frequency (40-500 Hz). Double-click to reset.");
+    dist(mx, my, _lcd_md_nx, _lcd_md_ny) <= _lcd_nr + 5 ? swing_tooltip_check(1103, "Mid band EQ node — drag Y for gain (-12 to +12 dB), drag X for frequency (200-8000 Hz). Double-click to reset.");
+    dist(mx, my, _lcd_hi_nx, _lcd_hi_ny) <= _lcd_nr + 5 ? swing_tooltip_check(1105, "High band EQ node — drag Y for gain (-12 to +12 dB), drag X for frequency (2-16 kHz). Double-click to reset.");
+
+    // Node hit detect (BEFORE knobs so EQ nodes get click priority over HPF/LPF knobs)
+    active_id == -1 && lmb_down && mx >= _lcd_cx && mx <= _lcd_cx + _lcd_cw && my >= _lcd_cy && my <= _lcd_cy + _lcd_ch ? (
+      meq_drag_my = my; meq_drag_mx = mx;
+      _hit_node = -1;
+      dist(mx, my, _lcd_lo_nx, _lcd_lo_ny) <= _lcd_nr + 5 ? ( _hit_node = 230; meq_drag_val_lo = gfx_eq_lo; meq_drag_freq_lo = gfx_eq_lo_freq; ) :
+      dist(mx, my, _lcd_md_nx, _lcd_md_ny) <= _lcd_nr + 5 ? ( _hit_node = 231; meq_drag_val_md = gfx_eq_mid; meq_drag_freq_md = gfx_eq_mid_freq; ) :
+      dist(mx, my, _lcd_hi_nx, _lcd_hi_ny) <= _lcd_nr + 5 ? ( _hit_node = 232; meq_drag_val_hi = gfx_eq_hi; meq_drag_freq_hi = gfx_eq_hi_freq; );
+
+      _hit_node >= 0 ? (
+        _eq_now = time_precise();
+        _dbl_click_id == _hit_node && (_eq_now - _dbl_click_time) < DBL_CLICK_T ? (
+          // Double-click: reset gain to 0 dB and freq to default
+          _hit_node == 230 ? ( gfx_eq_lo = 0; gfx_eq_lo_freq = 200; ) :
+          _hit_node == 231 ? ( gfx_eq_mid = 0; gfx_eq_mid_freq = 1000; ) :
+          ( gfx_eq_hi = 0; gfx_eq_hi_freq = 5000; );
+          recalc_master_eq(); mark_dirty();
+          _dbl_click_id = -1;
+          // Don't set active_id — suppress drag on double-click
+        ) : (
+          active_id = _hit_node;
+          _dbl_click_id = _hit_node; _dbl_click_time = _eq_now;
+        );
+      );
+    );
+
+    // ── HPF / LPF knobs (bottom corners of EQ graph) ──
+    _meq_kr = 12;
+    _meq_hpf_cx = _lcd_cx + _meq_kr + 4;
+    _meq_hpf_cy = _lcd_cy + _lcd_ch - _meq_kr - 3;
+    _meq_lpf_cx = _lcd_cx + _lcd_cw - _meq_kr - 4;
+    _meq_lpf_cy = _meq_hpf_cy;
+
+    // HPF knob interact + draw (skip interaction when EQ node is being dragged)
+    // Use log-space mapping so low frequencies get fine resolution (avoids jumps)
+    _lcd_hpf_active = gfx_hpf_freq > 25;
+    active_id < 230 || active_id > 232 ? (
+      _hpf_log = log10(max(20, gfx_hpf_freq));
+      _hpf_log_nv = mpc_knob_interact(km_gfx_hpf, _meq_hpf_cx, _meq_hpf_cy, _meq_kr, _hpf_log, log10(20), log10(8000), log10(20), 0);
+      _hpf_log_nv != _hpf_log ? (
+        gfx_hpf_freq = pow(10, _hpf_log_nv);
+        gfx_hpf_freq <= 25 ? gfx_hpf_freq = 20;
+        mark_dirty();
+      );
+    );
+    mpc_knob_draw(_meq_hpf_cx, _meq_hpf_cy, _meq_kr, log10(max(20, gfx_hpf_freq)), log10(20), log10(8000), 0, km_gfx_hpf[0],
+      _lcd_hpf_active ? 0.85 : 0.40, _lcd_hpf_active ? 0.35 : 0.38, _lcd_hpf_active ? 0.20 : 0.40,
+      0.08, 0.08, 0.10);
+    dist(mx, my, _meq_hpf_cx, _meq_hpf_cy) <= _meq_kr + 4 ? swing_tooltip_check(1108, "Master HPF (high-pass filter, 20-8000 Hz, log). Removes low-end rumble before EQ. OFF at minimum.");
+    // HPF label + value
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_set(0.85, 0.35, 0.20, _lcd_hpf_active ? 0.9 : 0.5);
+    gfx_measurestr("HPF",tw,th);
+    gfx_x = _meq_hpf_cx - tw/2; gfx_y = _meq_hpf_cy - _meq_kr - th - 1; gfx_drawstr("HPF");
+    _lcd_hpf_active ? (
+      gfx_hpf_freq >= 1000 ? sprintf(#_lv,"%.1fk",gfx_hpf_freq/1000) : sprintf(#_lv,"%.0f",gfx_hpf_freq);
+    ) : strcpy(#_lv, "OFF");
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_set(1, 1, 1, _lcd_hpf_active ? 0.9 : 0.5);
+    gfx_measurestr(#_lv,tw,th);
+    gfx_x = _meq_hpf_cx - tw/2; gfx_y = _meq_hpf_cy - th/2; gfx_drawstr(#_lv);
+
+    // LPF knob interact + draw (skip interaction when EQ node is being dragged)
+    // Use log-space mapping (same as HPF)
+    _lcd_lpf_active = gfx_lpf_freq < 19500;
+    active_id < 230 || active_id > 232 ? (
+      _lpf_log = log10(max(200, gfx_lpf_freq));
+      _lpf_log_nv = mpc_knob_interact(km_gfx_lpf, _meq_lpf_cx, _meq_lpf_cy, _meq_kr, _lpf_log, log10(200), log10(20000), log10(20000), 0);
+      _lpf_log_nv != _lpf_log ? (
+        gfx_lpf_freq = pow(10, _lpf_log_nv);
+        gfx_lpf_freq >= 19500 ? gfx_lpf_freq = 20000;
+        mark_dirty();
+      );
+    );
+    mpc_knob_draw(_meq_lpf_cx, _meq_lpf_cy, _meq_kr, log10(max(200, gfx_lpf_freq)), log10(200), log10(20000), 0, km_gfx_lpf[0],
+      _lcd_lpf_active ? 0.20 : 0.40, _lcd_lpf_active ? 0.55 : 0.38, _lcd_lpf_active ? 0.85 : 0.40,
+      0.08, 0.08, 0.10);
+    dist(mx, my, _meq_lpf_cx, _meq_lpf_cy) <= _meq_kr + 4 ? swing_tooltip_check(1109, "Master LPF (low-pass filter, 200-20000 Hz, log). Tames high frequencies after EQ. OFF at maximum.");
+    // LPF label + value
+    gfx_set(0.20, 0.55, 0.85, _lcd_lpf_active ? 0.9 : 0.5);
+    gfx_measurestr("LPF",tw,th);
+    gfx_x = _meq_lpf_cx - tw/2; gfx_y = _meq_lpf_cy - _meq_kr - th - 1; gfx_drawstr("LPF");
+    _lcd_lpf_active ? (
+      gfx_lpf_freq >= 1000 ? sprintf(#_lv,"%.1fk",gfx_lpf_freq/1000) : sprintf(#_lv,"%.0f",gfx_lpf_freq);
+    ) : strcpy(#_lv, "OFF");
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_set(1, 1, 1, _lcd_lpf_active ? 0.9 : 0.5);
+    gfx_measurestr(#_lv,tw,th);
+    gfx_x = _meq_lpf_cx - tw/2; gfx_y = _meq_lpf_cy - th/2; gfx_drawstr(#_lv);
+
+    // dB + Hz labels on nodes
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_eq_lo != 0 ? (
+      gfx_set(0.85, 0.65, 0.20, 1); sprintf(#_lv,"%+.0f dB", gfx_eq_lo);
+      gfx_measurestr(#_lv,tw,th);
+      gfx_x = _lcd_lo_nx - tw/2; gfx_y = _lcd_lo_ny < _lcd_mid_y ? _lcd_lo_ny - th - 2 : _lcd_lo_ny + _lcd_nr + 1;
+      gfx_drawstr(#_lv);
+    );
+    gfx_eq_mid != 0 ? (
+      gfx_set(0.70, 0.85, 0.30, 1); sprintf(#_lv,"%+.0f dB", gfx_eq_mid);
+      gfx_measurestr(#_lv,tw,th);
+      gfx_x = _lcd_md_nx - tw/2; gfx_y = _lcd_md_ny < _lcd_mid_y ? _lcd_md_ny - th - 2 : _lcd_md_ny + _lcd_nr + 1;
+      gfx_drawstr(#_lv);
+    );
+    gfx_eq_hi != 0 ? (
+      gfx_set(0.30, 0.70, 0.85, 1); sprintf(#_lv,"%+.0f dB", gfx_eq_hi);
+      gfx_measurestr(#_lv,tw,th);
+      gfx_x = _lcd_hi_nx - tw/2; gfx_y = _lcd_hi_ny < _lcd_mid_y ? _lcd_hi_ny - th - 2 : _lcd_hi_ny + _lcd_nr + 1;
+      gfx_drawstr(#_lv);
+    );
+
+    // (Node drag moved before curve drawing — IDs 230-232 processed above)
+    // (Node hit detect moved before knobs — see above)
+    // (HPF/LPF are now knobs — IDs 233/234 no longer used)
+
+    // "MASTER EQ" label + BYPASS pill
+    gfx_setfont(1, "Arial", 8, 'b');
+    gfx_set(lcd_tx_r * 0.5, lcd_tx_g * 0.5, lcd_tx_b * 0.5, 0.6);
+    gfx_x = _lcd_cx + 2; gfx_y = _lcd_cy;
+    meq_bypass ? gfx_drawstr("MASTER EQ [BYP]") : gfx_drawstr("MASTER EQ");
+    // Bypass clickable pill
+    gfx_setfont(1, "Arial", 9, 'b');
+    _byp_w = 22; _byp_h = 10;
+    _byp_x = _lcd_cx + _lcd_cw - 28 * 2 - 8 - _byp_w - 4;
+    _byp_y = _lcd_cy + 1;
+    meq_bypass ? gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.8) : gfx_set(0.30, 0.65, 0.35, 0.5);
+    gfx_rect(_byp_x, _byp_y, _byp_w, _byp_h);
+    gfx_set(1, 1, 1, 0.9);
+    meq_bypass ? strcpy(#_byp, "BYP") : strcpy(#_byp, "ON");
+    gfx_measurestr(#_byp, tw, th);
+    gfx_x = _byp_x + (_byp_w - tw) / 2; gfx_y = _byp_y + (_byp_h - th) / 2;
+    gfx_drawstr(#_byp);
+    mx >= _byp_x && mx <= _byp_x + _byp_w && my >= _byp_y && my <= _byp_y + _byp_h ? swing_tooltip_check(1110, "Bypass the entire master EQ section.");
+    lmb_down && mx >= _byp_x && mx <= _byp_x + _byp_w && my >= _byp_y && my <= _byp_y + _byp_h ? (
+      meq_bypass = !meq_bypass; mark_dirty();
+    );
+
+    // ── Shelf / Bell toggle pills for Lo and Hi bands ──
+    gfx_setfont(1, "Arial", 9, 'b');
+    // Lo band toggle (near gold node label area, top-right of graph)
+    _tgl_w = 28; _tgl_h = 10;
+    _tgl_lo_x = _lcd_cx + _lcd_cw - _tgl_w * 2 - 8;
+    _tgl_lo_y = _lcd_cy + 1;
+    meq_lo_bell ? strcpy(#_tgl_lo, "BELL") : strcpy(#_tgl_lo, "SHELF");
+    gfx_set(0.85, 0.65, 0.20, meq_lo_bell ? 0.7 : 0.35);
+    gfx_rect(_tgl_lo_x, _tgl_lo_y, _tgl_w, _tgl_h);
+    gfx_set(0, 0, 0, 0.9);
+    gfx_measurestr(#_tgl_lo, tw, th);
+    gfx_x = _tgl_lo_x + (_tgl_w - tw) / 2; gfx_y = _tgl_lo_y + (_tgl_h - th) / 2;
+    gfx_drawstr(#_tgl_lo);
+    mx >= _tgl_lo_x && mx <= _tgl_lo_x + _tgl_w && my >= _tgl_lo_y && my <= _tgl_lo_y + _tgl_h ? swing_tooltip_check(1102, "Low band shape — SHELF boosts/cuts everything below the freq; BELL peaks around the freq.");
+    lmb_down && mx >= _tgl_lo_x && mx <= _tgl_lo_x + _tgl_w && my >= _tgl_lo_y && my <= _tgl_lo_y + _tgl_h ? (
+      meq_lo_bell = !meq_lo_bell;
+      recalc_master_eq(); mark_dirty();
+    );
+    // Hi band toggle
+    _tgl_hi_x = _lcd_cx + _lcd_cw - _tgl_w - 4;
+    _tgl_hi_y = _lcd_cy + 1;
+    meq_hi_bell ? strcpy(#_tgl_hi, "BELL") : strcpy(#_tgl_hi, "SHELF");
+    gfx_set(0.30, 0.70, 0.85, meq_hi_bell ? 0.7 : 0.35);
+    gfx_rect(_tgl_hi_x, _tgl_hi_y, _tgl_w, _tgl_h);
+    gfx_set(0, 0, 0, 0.9);
+    gfx_measurestr(#_tgl_hi, tw, th);
+    gfx_x = _tgl_hi_x + (_tgl_w - tw) / 2; gfx_y = _tgl_hi_y + (_tgl_h - th) / 2;
+    gfx_drawstr(#_tgl_hi);
+    mx >= _tgl_hi_x && mx <= _tgl_hi_x + _tgl_w && my >= _tgl_hi_y && my <= _tgl_hi_y + _tgl_h ? swing_tooltip_check(1107, "High band shape — SHELF boosts/cuts everything above the freq; BELL peaks around the freq.");
+    lmb_down && mx >= _tgl_hi_x && mx <= _tgl_hi_x + _tgl_w && my >= _tgl_hi_y && my <= _tgl_hi_y + _tgl_h ? (
+      meq_hi_bell = !meq_hi_bell;
+      recalc_master_eq(); mark_dirty();
+    );
+);
+
+function swing_panels_draw_delay() (
+    // ── Shared layout for FX rows ──
+    _fx_y0 = _lcd_cy + 2;
+    _fx_avail_h = _lcd_ch - 6;
+    _fx_label_w = (_lcd_cw * 0.38)|0;
+    _fx_bar_x = _lcd_cx + _fx_label_w;
+    _fx_bar_w = _lcd_cw - _fx_label_w - 4;
+    gfx_setfont(1, "Arial", 9, 'b');
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DELAY — Params: DIV (tempo sync), FB, MIX, HPF, LPF, PING
+    // ═══════════════════════════════════════════════════════════════════
+    1 ? (
+      _fx_row_h = (_fx_avail_h / 6)|0;
+
+      // Row 0: SYNC (click to cycle divisions)
+      _fx_ry = _fx_y0;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("SYNC:");
+      // Division name (uses expanded 16-value system)
+      get_rpt_div_name(dly_div); strcpy(#_dly_dn, #_rpt_name);
+      // Button background
+      dly_div > 0 ? gfx_set(0.20, 0.55, 0.80, 0.7) : gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 0.95);
+      gfx_measurestr(#_dly_dn, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_dly_dn);
+      // Left-click: cycle straight divisions, right-click: full menu
+      _in_sync = mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h;
+      _in_sync ? swing_tooltip_check(1200, "Tempo-sync delay division. Left-click cycles straight; right-click for triplet/dotted; scroll for fine step.");
+      _in_sync && lmb_down ? (
+        dly_div == 0  ? dly_div = 1  :
+        dly_div == 1  ? dly_div = 4  :
+        dly_div == 4  ? dly_div = 7  :
+        dly_div == 7  ? dly_div = 10 :
+        dly_div == 10 ? dly_div = 13 :
+        dly_div = 0;
+        dly_recalc(); mark_dirty();
+      );
+      _in_sync && rmb_down ? (
+        resp = gfx_showmenu("OFF|1/4|1/4 T|1/4 D||1/8|1/8 T|1/8 D||1/16|1/16 T|1/16 D||1/32|1/32 T|1/32 D||1/64|1/64 T|1/64 D");
+        resp > 0 ? ( dly_div = resp - 1; dly_recalc(); mark_dirty(); );
+      );
+      _in_sync && frame_wheel != 0 ? (
+        dly_div = dly_div + sign_of(frame_wheel);
+        dly_div < 0 ? dly_div = RPT_NUM_DIVS;
+        dly_div > RPT_NUM_DIVS ? dly_div = 0;
+        dly_recalc(); mark_dirty();
+      );
+
+      // Row 1: FEEDBACK
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("FB:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = ((dly_fb / 0.95) * _fx_bar_w)|0;
+      gfx_set(0.30, 0.60, 0.90, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", dly_fb * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 281 ? ( LMB ? (
+        dly_fb = max(0, min(0.95, (mx - _fx_bar_x) / _fx_bar_w * 0.95));
+        mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1201, "Delay feedback (0-95%). 0=single tap, 95%=dense self-feeding repeats. Drag or scroll.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 281;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        dly_fb = max(0, min(0.95, dly_fb + frame_wheel * 0.02)); mark_dirty();
+      );
+
+      // Row 2: MIX
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("MIX:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = (dly_mix * _fx_bar_w)|0;
+      gfx_set(0.30, 0.60, 0.90, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", dly_mix * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 280 ? ( LMB ? (
+        dly_mix = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1202, "Delay wet/dry blend (0=dry, 100%=full delay). Drag or scroll.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 280;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        dly_mix = max(0, min(1, dly_mix + frame_wheel * 0.02)); mark_dirty();
+      );
+
+      // Row 3: HPF
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("HPF:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _hpf_norm = (log(max(20, dly_hpf_hz)) - log(20)) / (log(2000) - log(20));
+      _fx_fill = (_hpf_norm * _fx_bar_w)|0;
+      gfx_set(0.25, 0.50, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f Hz", dly_hpf_hz);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 284 ? ( LMB ? (
+        _hpf_norm = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        dly_hpf_hz = exp(log(20) + _hpf_norm * (log(2000) - log(20)));
+        dly_hpf_hz = max(20, min(2000, dly_hpf_hz));
+        dly_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1203, "High-pass filter on the delay signal (20-2000 Hz, log). Removes low-end mud from repeats.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 284;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        _hpf_norm = (log(max(20, dly_hpf_hz)) - log(20)) / (log(2000) - log(20));
+        _hpf_norm = max(0, min(1, _hpf_norm + frame_wheel * 0.03));
+        dly_hpf_hz = max(20, min(2000, exp(log(20) + _hpf_norm * (log(2000) - log(20)))));
+        dly_recalc(); mark_dirty();
+      );
+
+      // Row 4: LPF
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("LPF:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _lpf_norm = (log(max(1000, dly_lpf_hz)) - log(1000)) / (log(20000) - log(1000));
+      _fx_fill = (_lpf_norm * _fx_bar_w)|0;
+      gfx_set(0.25, 0.50, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      dly_lpf_hz >= 19500 ? strcpy(#_fxv, "OFF") : sprintf(#_fxv, "%.0f Hz", dly_lpf_hz);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 285 ? ( LMB ? (
+        _lpf_norm = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        dly_lpf_hz = exp(log(1000) + _lpf_norm * (log(20000) - log(1000)));
+        dly_lpf_hz = max(1000, min(20000, dly_lpf_hz));
+        dly_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1204, "Low-pass filter on the delay signal (1k-20kHz, log). OFF above 19.5kHz. Tames bright repeats.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 285;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        _lpf_norm = (log(max(1000, dly_lpf_hz)) - log(1000)) / (log(20000) - log(1000));
+        _lpf_norm = max(0, min(1, _lpf_norm + frame_wheel * 0.03));
+        dly_lpf_hz = max(1000, min(20000, exp(log(1000) + _lpf_norm * (log(20000) - log(1000)))));
+        dly_recalc(); mark_dirty();
+      );
+
+      // Row 5: PING-PONG (toggle)
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("PING:");
+      dly_ping ? gfx_set(0.20, 0.55, 0.80, 0.7) : gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 0.9);
+      dly_ping ? strcpy(#_fxv, "ON") : strcpy(#_fxv, "OFF");
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1205, "Ping-pong delay mode — alternates repeats between L and R channels for stereo motion.");
+      lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        dly_ping = !dly_ping; mark_dirty();
+      );
+    );
+);
+
+function swing_panels_draw_reverb() (
+    _fx_y0 = _lcd_cy + 2;
+    _fx_avail_h = _lcd_ch - 6;
+    _fx_label_w = (_lcd_cw * 0.38)|0;
+    _fx_bar_x = _lcd_cx + _fx_label_w;
+    _fx_bar_w = _lcd_cw - _fx_label_w - 4;
+    gfx_setfont(1, "Arial", 9, 'b');
+
+    // ═══════════════════════════════════════════════════════════════════
+    // REVERB — Params: SIZE, DAMP, PRE, HPF, MIX, WIDTH
+    // ═══════════════════════════════════════════════════════════════════
+    1 ? (
+      _fx_row_h = (_fx_avail_h / 6)|0;
+
+      // Row 0: SIZE
+      _fx_ry = _fx_y0;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("SIZE:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = (rvb_size * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", rvb_size * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 282 ? ( LMB ? (
+        rvb_size = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        rvb_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1300, "Reverb room size (0-100%). 0=tiny chamber, 100%=large hall. Drag or scroll.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 282;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_size = max(0, min(1, rvb_size + frame_wheel * 0.02)); rvb_recalc(); mark_dirty();
+      );
+
+      // Row 1: DAMP
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("DAMP:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = (rvb_damp * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", rvb_damp * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 286 ? ( LMB ? (
+        rvb_damp = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        rvb_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1301, "Reverb high-frequency damping (0-100%). Higher values make the tail darker and shorter at the top end.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 286;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_damp = max(0, min(1, rvb_damp + frame_wheel * 0.02)); rvb_recalc(); mark_dirty();
+      );
+
+      // Row 2: PRE (pre-delay 0-250ms)
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("PRE:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = ((rvb_predelay / 250) * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f ms", rvb_predelay);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 288 ? ( LMB ? (
+        rvb_predelay = max(0, min(250, ((mx - _fx_bar_x) / _fx_bar_w) * 250));
+        rvb_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1302, "Pre-delay before reverb tail starts (0-250 ms). Keeps the dry transient clear.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 288;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_predelay = max(0, min(250, rvb_predelay + frame_wheel * 5)); rvb_recalc(); mark_dirty();
+      );
+
+      // Row 3: HPF (0-500 Hz, 0 = off)
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("HPF:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = ((rvb_hpf / 500) * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      rvb_hpf < 1 ? (
+        sprintf(#_fxv, "OFF");
+      ) : (
+        sprintf(#_fxv, "%.0f Hz", rvb_hpf);
+      );
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 289 ? ( LMB ? (
+        rvb_hpf = max(0, min(500, ((mx - _fx_bar_x) / _fx_bar_w) * 500));
+        rvb_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1303, "High-pass filter on the reverb send (0-500 Hz). Reduces low-end buildup. OFF below 1 Hz.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 289;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_hpf = max(0, min(500, rvb_hpf + frame_wheel * 10)); rvb_recalc(); mark_dirty();
+      );
+
+      // Row 4: MIX
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("MIX:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = (rvb_mix * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", rvb_mix * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 283 ? ( LMB ? (
+        rvb_mix = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1304, "Reverb wet/dry blend (0=dry, 100%=full reverb). Drag or scroll.");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 283;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_mix = max(0, min(1, rvb_mix + frame_wheel * 0.02)); mark_dirty();
+      );
+
+      // Row 5: WIDTH
+      _fx_ry += _fx_row_h;
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+      gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("WIDTH:");
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+      _fx_fill = (rvb_width * _fx_bar_w)|0;
+      gfx_set(0.45, 0.30, 0.75, 0.7);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.0f%%", rvb_width * 100);
+      gfx_measurestr(#_fxv, tw, th);
+      gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+      active_id == 287 ? ( LMB ? (
+        rvb_width = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+        rvb_recalc(); mark_dirty();
+      ) : active_id = -1; );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1305, "Stereo width of the reverb tail (0=mono, 100%=full stereo spread).");
+      active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+        active_id = 287;
+      );
+      mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+        rvb_width = max(0, min(1, rvb_width + frame_wheel * 0.02)); rvb_recalc(); mark_dirty();
+      );
+    );
+);
+
+function swing_panels_draw_comp() (
+    _fx_y0 = _lcd_cy + 2;
+    _fx_avail_h = _lcd_ch - 6;
+    _fx_label_w = (_lcd_cw * 0.30)|0;
+    _fx_bar_x = _lcd_cx + _fx_label_w;
+    _fx_bar_w = _lcd_cw - _fx_label_w - 4;
+    gfx_setfont(1, "Arial", 9, 'b');
+    _fx_row_h = (_fx_avail_h / 9)|0;  // 9 rows: ON, THR, RAT, ATK, REL, KNEE, MIX, GAIN, GR
+
+    // ── Row 0: COMP ON/OFF ──
+    _fx_ry = _fx_y0;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("COMP:");
+    !cmp_bypass ? gfx_set(0.25, 0.65, 0.35, 0.8) : gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    gfx_set(1, 1, 1, 0.9);
+    !cmp_bypass ? strcpy(#_fxv, "ON") : strcpy(#_fxv, "OFF");
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1400, "Master compressor on/off. Toggles the whole COMP section.");
+    lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      cmp_bypass = !cmp_bypass; mark_dirty();
+    );
+
+    // ── Row 1: THRESHOLD (-40 to 0 dB) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("THR:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = ((cmp_thresh + 40) / 40 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%.1f dB", cmp_thresh);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 300 ? ( LMB ? (
+      cmp_thresh = max(-40, min(0, -40 + (mx - _fx_bar_x) / _fx_bar_w * 40));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1401, "Threshold (-40 to 0 dB). Compression engages above this signal level.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 300;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_thresh = max(-40, min(0, cmp_thresh + frame_wheel * 1)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 2: RATIO (1:1 to 20:1) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("RAT:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = ((cmp_ratio - 1) / 19 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    cmp_ratio >= 20 ? strcpy(#_fxv, "LIM") : sprintf(#_fxv, "%.1f:1", cmp_ratio);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 301 ? ( LMB ? (
+      cmp_ratio = max(1, min(20, 1 + (mx - _fx_bar_x) / _fx_bar_w * 19));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1402, "Compression ratio (1:1 = none, 20:1 = limiting). Slope above threshold.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 301;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_ratio = max(1, min(20, cmp_ratio + frame_wheel * 0.5)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 3: ATTACK (0.1–100 ms) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("ATK:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = (cmp_attack / 100 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%.1f ms", cmp_attack);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 302 ? ( LMB ? (
+      cmp_attack = max(0.1, min(100, (mx - _fx_bar_x) / _fx_bar_w * 100));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1403, "Attack time (0.1-100 ms). How quickly compression engages after threshold is crossed.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 302;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_attack = max(0.1, min(100, cmp_attack + frame_wheel * 2)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 4: RELEASE (10–1000 ms) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("REL:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = ((cmp_release - 10) / 990 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%.0f ms", cmp_release);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 303 ? ( LMB ? (
+      cmp_release = max(10, min(1000, 10 + (mx - _fx_bar_x) / _fx_bar_w * 990));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1404, "Release time (10-1000 ms). How quickly compression lets go after the signal drops below threshold.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 303;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_release = max(10, min(1000, cmp_release + frame_wheel * 20)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 5: KNEE (0–12 dB) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("KNEE:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = (cmp_knee / 12 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%.1f dB", cmp_knee);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 304 ? ( LMB ? (
+      cmp_knee = max(0, min(12, (mx - _fx_bar_x) / _fx_bar_w * 12));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1405, "Knee softness (0 dB = hard, 12 dB = smooth gradual onset around the threshold).");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 304;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_knee = max(0, min(12, cmp_knee + frame_wheel * 0.5)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 6: MIX (0–100%) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("MIX:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = (cmp_mix * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%.0f%%", cmp_mix * 100);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 305 ? ( LMB ? (
+      cmp_mix = max(0, min(1, (mx - _fx_bar_x) / _fx_bar_w));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1406, "Parallel compression blend (0=uncompressed, 100%=fully compressed). NY-style mix.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 305;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_mix = max(0, min(1, cmp_mix + frame_wheel * 0.05)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 7: MAKEUP GAIN (-12 to +12 dB) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("GAIN:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    _fx_fill = ((cmp_makeup + 12) / 24 * _fx_bar_w)|0;
+    gfx_set(0.65, 0.45, 0.20, 0.7);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, max(1, _fx_fill), _fx_row_h - 3);
+    gfx_set(1, 1, 1, 1);
+    sprintf(#_fxv, "%+.1f dB", cmp_makeup);
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    active_id == 306 ? ( LMB ? (
+      cmp_makeup = max(-12, min(12, -12 + (mx - _fx_bar_x) / _fx_bar_w * 24));
+      cmp_recalc(); mark_dirty();
+    ) : active_id = -1; );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1407, "Makeup gain (-12 to +12 dB) — compensates for level reduction caused by compression.");
+    active_id == -1 && lmb_down && mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? (
+      active_id = 306;
+    );
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h && frame_wheel != 0 ? (
+      cmp_makeup = max(-12, min(12, cmp_makeup + frame_wheel * 0.5)); cmp_recalc(); mark_dirty();
+    );
+
+    // ── Row 8: GR METER (display only) ──
+    _fx_ry += _fx_row_h;
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.85);
+    gfx_x = _lcd_cx + 2; gfx_y = _fx_ry; gfx_drawstr("GR:");
+    gfx_set(0.06, 0.16, 0.20, 0.6);
+    gfx_rect(_fx_bar_x, _fx_ry + 1, _fx_bar_w, _fx_row_h - 3);
+    !cmp_bypass && cmp_gr_smooth < -0.1 ? (
+      _gr_norm = min(1.0, abs(cmp_gr_smooth) / 24);
+      _gr_fill = (_gr_norm * _fx_bar_w)|0;
+      gfx_set(0.85, 0.35, 0.20, 0.8);
+      gfx_rect(_fx_bar_x, _fx_ry + 1, _gr_fill, _fx_row_h - 3);
+      gfx_set(1, 1, 1, 1);
+      sprintf(#_fxv, "%.1f dB", cmp_gr_smooth);
+    ) : (
+      gfx_set(0.4, 0.5, 0.4, 0.6);
+      strcpy(#_fxv, "0.0 dB");
+    );
+    gfx_measurestr(#_fxv, tw, th);
+    gfx_x = _fx_bar_x + (_fx_bar_w - tw) / 2; gfx_y = _fx_ry; gfx_drawstr(#_fxv);
+    mx >= _fx_bar_x && mx <= _fx_bar_x + _fx_bar_w && my >= _fx_ry && my <= _fx_ry + _fx_row_h ? swing_tooltip_check(1408, "Gain Reduction meter — shows how much the compressor is attenuating in real time.");
+);

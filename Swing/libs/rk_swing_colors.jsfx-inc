@@ -1,0 +1,504 @@
+// rk_swing_colors.jsfx-inc
+// Swing color system — themes, auto-color, intensity, pre-computed RGBA
+// v2.1 color system
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+// ─── Theme constants ───────────────────────────────────────────────────
+COL_THEME_RAINBOW  = 0;
+COL_THEME_MONO     = 1;
+COL_THEME_DRUMTYPE = 2;
+COL_THEME_DARK     = 3;
+COL_THEME_NEON     = 4;
+COL_THEME_PASTEL   = 5;
+COL_NUM_THEMES     = 6;
+
+// ─── Auto-color mode constants ─────────────────────────────────────────
+COL_AUTO_OFF       = 0;
+COL_AUTO_DRUMTYPE  = 1;
+COL_AUTO_OUTPUT    = 2;
+COL_AUTO_RAINBOW   = 3;
+COL_NUM_AUTO_MODES = 4;
+
+// ─── Init: allocate freemem ────────────────────────────────────────────
+function swing_color_init(mem_base)
+local(_base)
+(
+  _base = mem_base;
+  col_rgba     = _base; _base += 16 * 3;  // 48: R,G,B per pad
+  col_rgba_dim = _base; _base += 16 * 3;  // 48: dimmed variant (muted pads)
+  col_auto_hue = _base; _base += 16;      // 16: auto-color hue buffer
+  memset(col_rgba, 0, 112);
+
+  // col_theme_id retained for legacy serialize compat (the value is
+  // ignored — themes/palettes were removed in the v43 color system
+  // simplification). Kept so old projects don't get a "field missing"
+  // mismatch on read; new projects just write 0.
+  col_theme_id     = 0;
+  // Default auto-color mode = DRUMTYPE (1) so fresh instances categorize
+  // pads by filename out of the box (kick → red, snare → orange, etc.).
+  // Existing projects keep whatever mode they had via swing_color_serialize.
+  col_auto_mode_id = 1;
+  col_intensity    = 1.0;
+  col_dirty        = 1;
+  col_panel_open   = 0;
+  // Mono toggle (new in v43). 0 = full color (default), 1 = grayscale.
+  // Replaces the old Mono THEME — single binary toggle in Color Panel.
+  col_mono         = 0;
+
+  _base;
+);
+
+// ─── Serialize ─────────────────────────────────────────────────────────
+function swing_color_serialize() (
+  // col_theme_id retained for backward-compat with v<43 projects that
+  // wrote it. Read consumes/discards; write keeps the slot populated so
+  // we don't drift the @serialize byte layout downstream.
+  file_var(0, col_theme_id);
+  file_var(0, col_auto_mode_id);
+  file_var(0, col_intensity);
+  // Migration: v43 had 5 modes (Folder=3, Rainbow=4).
+  // v44+ drops Folder → Rainbow moves to slot 3, 4 modes total.
+  is_read && ser_ver < 44 ? (
+    col_auto_mode_id == 3 ? col_auto_mode_id = 0    // Folder → Off
+    : col_auto_mode_id == 4 ? col_auto_mode_id = 3; // Rainbow(4) → Rainbow(3)
+  );
+  is_read ? (
+    col_auto_mode_id >= COL_NUM_AUTO_MODES ? col_auto_mode_id = 0;  // invalid → Off
+  );
+  // v43+: mono toggle. EEL2 zero-inits col_mono on fresh instance =
+  // full color (correct default). Old projects on first load: read
+  // skips this slot via the ser_ver gate in @serialize main block,
+  // and col_mono stays 0.
+);
+
+// ─── Get effective S/L (replaces the old multi-theme getter) ──────────
+// Themes were removed in v43. Effective saturation = baseline × intensity,
+// or 0.08 (Mono) when col_mono is on. Lightness is a fixed baseline.
+// Sets _sc_s and _sc_l like the old swing_color_get_theme_sl did, so
+// downstream code (swing_color_rebuild, render) works unchanged.
+function swing_color_get_theme_sl(tid)
+(
+  // tid argument retained for legacy callers; ignored (kept to preserve
+  // the existing call signature so we don't have to chase down every
+  // call site this commit). col_mono and col_intensity drive everything.
+  col_mono ? (
+    _sc_s = 0.08;  // grayscale
+    _sc_l = 0.50;
+  ) : (
+    _sc_s = 0.75;  // baseline saturation (was Rainbow theme's S)
+    _sc_l = 0.55;  // baseline lightness  (was Rainbow theme's L)
+  );
+);
+
+// ─── Drum type hue from pad name (30 categories) ──────────────────────
+// Mirrors eon_filename_categorizer.lua's CATEGORY_KEYWORDS in the same
+// CATEGORY_ORDER priority — specific categories win on tie-break.
+// Each category gets a unique hue (0..1) so kicks→red, snares→orange,
+// claps→green, closed hats→teal, open hats→violet. The 5 core types are
+// spread across the full color wheel for maximum distinction.
+// The browser's CATEGORY_COLORS in the categorizer
+// uses the equivalent RGB for these same hues, so colors stay consistent
+// between the browser file list and the JSFX pad grid.
+function swing_color_drumtype_hue(pad_idx)
+local(_cn, _len, _i, _ch, _h)
+(
+  _cn = get_cname_slot(pad_idx);
+  _len = strlen(_cn);
+  _len == 0 ? (
+    _cn = get_name_slot(pad_idx);
+    _len = strlen(_cn);
+  );
+
+  // Lowercase + normalize separators '_' '-' '.' to spaces so "kick_punchy"
+  // matches "*kick*" the same as "kick punchy". Mirrors the categorizer's
+  // normalize step (eon_filename_categorizer.lua:193).
+  strcpy(#_ct_tmp, _cn);
+  _i = 0; loop(_len,
+    _ch = str_getchar(#_ct_tmp, _i);
+    _ch >= 65 && _ch <= 90 ? str_setchar(#_ct_tmp, _i, _ch + 32) :
+    (_ch == 95 || _ch == 45 || _ch == 46) ? str_setchar(#_ct_tmp, _i, 32);
+    _i += 1;
+  );
+
+  // Default: "other" (hue 0.90 — pink, distinct from any category)
+  _h = 0.90;
+
+  // ── Drums (red zone) ──
+  match("*kick*", #_ct_tmp) || match("*kck*", #_ct_tmp) || match("*kik*", #_ct_tmp) ||
+  match("*bassdrum*", #_ct_tmp) || match("*bass drum*", #_ct_tmp) ||
+  match("*808kick*", #_ct_tmp) || match("*808 kick*", #_ct_tmp) ||
+  match("*808bd*", #_ct_tmp) || match("*909kick*", #_ct_tmp) ||
+  match("*909bd*", #_ct_tmp) || match("*909 kick*", #_ct_tmp) ? (
+    _h = 0.00;  // kick — RED
+  ) :
+  match("*rimshot*", #_ct_tmp) || match("*rim shot*", #_ct_tmp) ||
+  match("*rim*", #_ct_tmp) ? (
+    _h = 0.06;  // rimshot (orange-red)
+  ) :
+  match("*snare*", #_ct_tmp) || match("*snr*", #_ct_tmp) ||
+  match("*clap snare*", #_ct_tmp) || match("*909snare*", #_ct_tmp) ||
+  match("*909 snare*", #_ct_tmp) ? (
+    _h = 0.12;  // snare — ORANGE
+  ) :
+  match("*clap*", #_ct_tmp) || match("*clp*", #_ct_tmp) ||
+  match("*handclap*", #_ct_tmp) || match("*hand clap*", #_ct_tmp) ? (
+    _h = 0.30;  // clap — GREEN
+  ) :
+
+  // ── Cymbals (gold zone) ──
+  match("*ride*", #_ct_tmp) ? (
+    _h = 0.17;  // ride (yellow)
+  ) :
+  match("*crash*", #_ct_tmp) || match("*crsh*", #_ct_tmp) ? (
+    _h = 0.19;  // crash (warm gold)
+  ) :
+  match("*cymbal*", #_ct_tmp) || match("*cym*", #_ct_tmp) ||
+  match("*splash*", #_ct_tmp) || match("*china*", #_ct_tmp) ? (
+    _h = 0.21;  // cymbal (gold)
+  ) :
+
+  // ── Brass (chartreuse) ──
+  match("*brass*", #_ct_tmp) || match("*trumpet*", #_ct_tmp) ||
+  match("*trombone*", #_ct_tmp) || match("*horn*", #_ct_tmp) ||
+  match("*tuba*", #_ct_tmp) || match("*flugelhorn*", #_ct_tmp) ||
+  match("*cornet*", #_ct_tmp) ? (
+    _h = 0.23;  // brass (chartreuse)
+  ) :
+
+  // ── Hand percussion (yellow-green to green) ──
+  match("*cowbell*", #_ct_tmp) || match("*cow bell*", #_ct_tmp) ? (
+    _h = 0.25;  // cowbell (yellow-green)
+  ) :
+  match("*clave*", #_ct_tmp) ? (
+    _h = 0.27;  // clave (lime)
+  ) :
+  match("*tambourine*", #_ct_tmp) || match("*tamb*", #_ct_tmp) ||
+  match("*tambou*", #_ct_tmp) ? (
+    _h = 0.33;  // tambourine (green)
+  ) :
+  match("*shaker*", #_ct_tmp) || match("*shake*", #_ct_tmp) ? (
+    _h = 0.35;  // shaker (forest green)
+  ) :
+  match("*maraca*", #_ct_tmp) ? (
+    _h = 0.37;  // maraca (green)
+  ) :
+  match("*conga*", #_ct_tmp) ? (
+    _h = 0.95;  // conga (pink-red)
+  ) :
+  match("*bongo*", #_ct_tmp) ? (
+    _h = 0.97;  // bongo (magenta-red)
+  ) :
+  match("*tom*", #_ct_tmp) ? (
+    _h = 0.03;  // tom (red-orange) — late: *tom* matches "bottom", "phantom" etc.
+  ) :
+  match("*perc*", #_ct_tmp) || match("*triangle*", #_ct_tmp) ||
+  match("*woodblock*", #_ct_tmp) || match("*wood block*", #_ct_tmp) ||
+  match("*cabasa*", #_ct_tmp) || match("*guiro*", #_ct_tmp) ||
+  match("*timbale*", #_ct_tmp) || match("*agogo*", #_ct_tmp) ||
+  match("*djembe*", #_ct_tmp) || match("*cajon*", #_ct_tmp) ||
+  match("*snap*", #_ct_tmp) ? (
+    _h = 0.40;  // percussion (deep green)
+  ) :
+
+  // ── Strings family (teal-cyan) ──
+  match("*guitar*", #_ct_tmp) || match("*gtr*", #_ct_tmp) ||
+  match("*guit*", #_ct_tmp) || match("*strat*", #_ct_tmp) ||
+  match("*tele*", #_ct_tmp) || match("*les paul*", #_ct_tmp) ||
+  match("*nylon*", #_ct_tmp) || match("*ukulele*", #_ct_tmp) ? (
+    _h = 0.43;  // guitar (teal)
+  ) :
+  match("*strings*", #_ct_tmp) || match("*violin*", #_ct_tmp) ||
+  match("*viola*", #_ct_tmp) || match("*cello*", #_ct_tmp) ||
+  match("*contrabass*", #_ct_tmp) || match("*orchestral*", #_ct_tmp) ||
+  match("*ensemble*", #_ct_tmp) || match("*chamber*", #_ct_tmp) ||
+  match("*pizzicato*", #_ct_tmp) ? (
+    _h = 0.46;  // strings (cyan)
+  ) :
+
+  // ── Hi-hat family (teal-cyan zone — distinct from drums) ──
+  match("*closed hat*", #_ct_tmp) || match("*closedhat*", #_ct_tmp) ||
+  match("*closed*", #_ct_tmp) ||
+  match("*hat closed*", #_ct_tmp) || match("*pedal hat*", #_ct_tmp) ||
+  match("*pedalhat*", #_ct_tmp) ||
+  // "ch" — word-boundary simulation (JSFX match has no frontier patterns):
+  // exact "ch", or "ch ..." / "... ch" / "... ch ..." with space delimiters.
+  match("ch", #_ct_tmp) || match("ch *", #_ct_tmp) ||
+  match("* ch", #_ct_tmp) || match("* ch *", #_ct_tmp) ? (
+    _h = 0.52;  // closed_hat — TEAL-CYAN
+  ) :
+  match("*open hat*", #_ct_tmp) || match("*openhat*", #_ct_tmp) ||
+  match("*hat open*", #_ct_tmp) ||
+  // "oh" — word-boundary simulation (same approach as "ch" above):
+  match("oh", #_ct_tmp) || match("oh *", #_ct_tmp) ||
+  match("* oh", #_ct_tmp) || match("* oh *", #_ct_tmp) ? (
+    _h = 0.72;  // open_hat — VIOLET
+  ) :
+  match("*hihat*", #_ct_tmp) || match("*hi hat*", #_ct_tmp) ||
+  match("*hh*", #_ct_tmp) || match("*hat*", #_ct_tmp) ? (
+    _h = 0.49;  // hihat generic (teal)
+  ) :
+
+  // ── Keys (cyan-blue) ──
+  match("*piano*", #_ct_tmp) || match("*keys*", #_ct_tmp) ||
+  match("*keyboard*", #_ct_tmp) || match("*organ*", #_ct_tmp) ||
+  match("*rhodes*", #_ct_tmp) || match("*wurlitzer*", #_ct_tmp) ||
+  match("*epiano*", #_ct_tmp) || match("*e piano*", #_ct_tmp) ||
+  match("*clav*", #_ct_tmp) || match("*marimba*", #_ct_tmp) ||
+  match("*vibraphone*", #_ct_tmp) || match("*xylophone*", #_ct_tmp) ||
+  match("*glockenspiel*", #_ct_tmp) || match("*celesta*", #_ct_tmp) ||
+  match("*harp*", #_ct_tmp) || match("*mallet*", #_ct_tmp) ? (
+    _h = 0.55;  // keys (cyan-blue)
+  ) :
+
+  // ── Atmospheres (blue zone) ──
+  match("*pad*", #_ct_tmp) || match("*ambient*", #_ct_tmp) ||
+  match("*atmosphere*", #_ct_tmp) || match("*atmo*", #_ct_tmp) ||
+  match("*drone*", #_ct_tmp) || match("*texture*", #_ct_tmp) ||
+  match("*evolving*", #_ct_tmp) || match("*soundscape*", #_ct_tmp) ? (
+    _h = 0.58;  // pad (sky blue)
+  ) :
+  match("*vocal*", #_ct_tmp) || match("*vox*", #_ct_tmp) ||
+  match("*voice*", #_ct_tmp) || match("*choir*", #_ct_tmp) ||
+  match("*acapella*", #_ct_tmp) || match("*a capella*", #_ct_tmp) ||
+  match("*singing*", #_ct_tmp) || match("*spoken*", #_ct_tmp) ||
+  match("*speech*", #_ct_tmp) || match("*adlib*", #_ct_tmp) ||
+  match("*chant*", #_ct_tmp) ? (
+    _h = 0.62;  // vocal (blue)
+  ) :
+  match("*synth*", #_ct_tmp) || match("*arp*", #_ct_tmp) ||
+  match("*pluck*", #_ct_tmp) || match("*stab*", #_ct_tmp) ||
+  match("*chord*", #_ct_tmp) || match("*saw*", #_ct_tmp) ||
+  match("*square*", #_ct_tmp) || match("*sine*", #_ct_tmp) ||
+  match("*supersaw*", #_ct_tmp) || match("*hoover*", #_ct_tmp) ? (
+    _h = 0.66;  // synth (indigo)
+  ) :
+
+  // ── Bass (purple) ──
+  match("*bass*", #_ct_tmp) || match("*sub*", #_ct_tmp) ||
+  match("*reese*", #_ct_tmp) ? (
+    _h = 0.76;  // bass (purple)
+  ) :
+
+  // ── Effects / loops (magenta-pink) ──
+  match("*sfx*", #_ct_tmp) || match("*effect*", #_ct_tmp) ||
+  match("*riser*", #_ct_tmp) || match("*impact*", #_ct_tmp) ||
+  match("*whoosh*", #_ct_tmp) || match("*sweep*", #_ct_tmp) ||
+  match("*noise*", #_ct_tmp) || match("*glitch*", #_ct_tmp) ||
+  match("*stutter*", #_ct_tmp) || match("*transition*", #_ct_tmp) ||
+  match("*reverse*", #_ct_tmp) || match("*buildup*", #_ct_tmp) ||
+  match("*build up*", #_ct_tmp) || match("*drop*", #_ct_tmp) ||
+  match("*explosion*", #_ct_tmp) || match("*boom*", #_ct_tmp) ||
+  match("*siren*", #_ct_tmp) || match("*foley*", #_ct_tmp) ||
+  match("*cinematic*", #_ct_tmp) ? (
+    _h = 0.82;  // fx (magenta)
+  ) :
+  match("*loop*", #_ct_tmp) || match("*break*", #_ct_tmp) ||
+  match("*groove*", #_ct_tmp) || match("*pattern*", #_ct_tmp) ||
+  match("*beat*", #_ct_tmp) ? (
+    _h = 0.86;  // loop (pink)
+  );
+
+  _h;
+);
+
+// ─── Apply auto-color → col_auto_hue[] ─────────────────────────────────
+function swing_color_apply_auto(mode_id)
+local(_i)
+(
+  _i = 0; loop(NUM_PADS,
+    mode_id == COL_AUTO_DRUMTYPE ? (
+      col_auto_hue[_i] = swing_color_drumtype_hue(_i);
+    ) :
+    mode_id == COL_AUTO_OUTPUT ? (
+      col_auto_hue[_i] = p_output[_i] / 16.0;
+    ) :
+    mode_id == COL_AUTO_RAINBOW ? (
+      col_auto_hue[_i] = _i / 16.0;
+    ) : (
+      col_auto_hue[_i] = p_color[_i];
+    );
+    _i += 1;
+  );
+);
+
+// ─── Rebuild pre-computed RGBA arrays ──────────────────────────────────
+function swing_color_rebuild()
+local(_i, _h, _cb, _eff_s)
+(
+  // Apply auto-color if active
+  col_auto_mode_id > 0 ? swing_color_apply_auto(col_auto_mode_id);
+
+  // Get theme S/L
+  swing_color_get_theme_sl(col_theme_id);
+  _eff_s = _sc_s * col_intensity;
+
+  // Publish effective S/L to gmem so the browser can match the JSFX
+  // pad-face colors exactly (theme + intensity, not a fixed S=0.75/L=0.55).
+  gmem[GS_COL_EFFECTIVE_S] = _eff_s;
+  gmem[GS_COL_EFFECTIVE_L] = _sc_l;
+
+  _i = 0; loop(NUM_PADS,
+    // Hue source: auto buffer or manual p_color
+    _h = col_auto_mode_id > 0 ? col_auto_hue[_i] : p_color[_i];
+
+    _cb = _i * 3;
+    _h < 0 ? (
+      // Achromatic specials: -1 = white, -2 = black
+      _h <= -1.5 ? (
+        col_rgba[_cb] = 0.20; col_rgba[_cb+1] = 0.20; col_rgba[_cb+2] = 0.22;
+        col_rgba_dim[_cb] = 0.15; col_rgba_dim[_cb+1] = 0.15; col_rgba_dim[_cb+2] = 0.16;
+      ) : (
+        col_rgba[_cb] = 0.82; col_rgba[_cb+1] = 0.82; col_rgba[_cb+2] = 0.85;
+        col_rgba_dim[_cb] = 0.44; col_rgba_dim[_cb+1] = 0.44; col_rgba_dim[_cb+2] = 0.45;
+      );
+    ) : (
+      // Normal HSL → RGB
+      hsl_to_rgb(_h, _eff_s, _sc_l);
+      col_rgba[_cb]     = _hsl_r;
+      col_rgba[_cb + 1] = _hsl_g;
+      col_rgba[_cb + 2] = _hsl_b;
+      col_rgba_dim[_cb]     = _hsl_r * 0.35 + 0.15;
+      col_rgba_dim[_cb + 1] = _hsl_g * 0.35 + 0.15;
+      col_rgba_dim[_cb + 2] = _hsl_b * 0.35 + 0.15;
+    );
+
+    _i += 1;
+  );
+
+  col_dirty = 0;
+);
+
+// ─── Color panel UI (inline below COLORS button) ──────────────────────
+function swing_color_draw_panel(_cp_x, _cp_y, _cp_w)
+local(_row_h, _row_y, _ti, _tx, _tw_btn, _tw_m, _th_m, _lbl,
+      _is_active, _bar_x, _bar_w, _bar_h, _fill_w, _knob_x,
+      _mi, _mx_lbl, _slider_id)
+(
+  _row_h = 24;
+
+  // ── Row 1+2: AUTO-COLOR mode (4 buttons: Off / DrumType / Output / Rainbow) ──
+  // Themes and palettes were removed in v43 — the color system now has just
+  // these three concerns: auto-color mode (these rows), Mono toggle (Row 3),
+  // and intensity (Row 4).
+  _row_y = _cp_y + 4;
+  gfx_setfont(1, "Arial", 8);
+  gfx_set(0.85, 0.92, 0.95, 1.0);
+  gfx_x = _cp_x + 4; gfx_y = _row_y;
+  gfx_drawstr("AUTO-COLOR");
+
+  _row_y += 12;
+  _tw_btn = ((_cp_w - 12) / 3)|0;
+  _mi = 0; loop(COL_NUM_AUTO_MODES,
+    _tx = _cp_x + 4 + (_mi % 3) * (_tw_btn + 2);
+    _mi >= 3 ? _row_y = _cp_y + 4 + 12 + 16;
+    _is_active = col_auto_mode_id == _mi;
+
+    _is_active ? (
+      gfx_set(0.15, 0.65, 0.55, 0.9);
+    ) : (
+      gfx_set(0.15, 0.25, 0.30, 0.8);
+    );
+    gfx_rect(_tx, _row_y, _tw_btn, 14);
+
+    _mi == 0 ? _mx_lbl = "Off" :
+    _mi == 1 ? _mx_lbl = "DrumType" :
+    _mi == 2 ? _mx_lbl = "Output" :
+               _mx_lbl = "Rainbow";
+    gfx_setfont(1, "Arial", 9);
+    // Brighter inactive text for readability (was 0.70/0.85/0.88 at 0.8α).
+    _is_active ? gfx_set(1, 1, 1, 1) : gfx_set(0.92, 0.96, 0.98, 1.0);
+    gfx_measurestr(_mx_lbl, _tw_m, _th_m);
+    gfx_x = _tx + (_tw_btn - _tw_m) * 0.5;
+    gfx_y = _row_y + (14 - _th_m) * 0.5;
+    gfx_drawstr(_mx_lbl);
+
+    mx >= _tx && mx <= _tx + _tw_btn && my >= _row_y && my <= _row_y + 14 && lmb_down ? (
+      col_auto_mode_id = _mi;
+      col_dirty = 1;
+    );
+
+    _mi += 1;
+  );
+
+  // ── Row 2: MONO toggle (single button — grayscale vs full color) ──
+  _row_y = _cp_y + 4 + 12 + 16 + 18;
+  gfx_setfont(1, "Arial", 8);
+  gfx_set(0.85, 0.92, 0.95, 1.0);
+  gfx_x = _cp_x + 4; gfx_y = _row_y;
+  gfx_drawstr("MONO");
+
+  _row_y += 12;
+  _tx = _cp_x + 4;
+  _tw_btn = _cp_w - 8;
+  col_mono ? (
+    gfx_set(0.65, 0.65, 0.68, 0.9);  // grayscale-themed active state
+  ) : (
+    gfx_set(0.15, 0.25, 0.30, 0.8);
+  );
+  gfx_rect(_tx, _row_y, _tw_btn, 14);
+
+  _mx_lbl = col_mono ? "Mono ON" : "Mono OFF";
+  gfx_setfont(1, "Arial", 9, 'b');
+  col_mono ? gfx_set(1, 1, 1, 1) : gfx_set(0.92, 0.96, 0.98, 1.0);
+  gfx_measurestr(_mx_lbl, _tw_m, _th_m);
+  gfx_x = _tx + (_tw_btn - _tw_m) * 0.5;
+  gfx_y = _row_y + (14 - _th_m) * 0.5;
+  gfx_drawstr(_mx_lbl);
+
+  mx >= _tx && mx <= _tx + _tw_btn && my >= _row_y && my <= _row_y + 14 && lmb_down ? (
+    col_mono = !col_mono;
+    col_dirty = 1;
+  );
+
+  // ── Row 3: Intensity slider ──
+  _row_y = _cp_y + 4 + 12 + 16 + 18 + 12 + 16 + 4;
+  gfx_setfont(1, "Arial", 8);
+  gfx_set(0.85, 0.92, 0.95, 1.0);
+  gfx_x = _cp_x + 4; gfx_y = _row_y;
+  gfx_drawstr("INTENSITY");
+
+  _bar_x = _cp_x + 4;
+  _bar_w = _cp_w - 40;
+  _bar_h = 10;
+  _row_y += 12;
+
+  // Background track
+  gfx_set(0.10, 0.18, 0.22, 1);
+  gfx_rect(_bar_x, _row_y, _bar_w, _bar_h);
+
+  // Filled portion
+  _fill_w = (col_intensity * _bar_w)|0;
+  gfx_set(0.20, 0.65, 0.70, 1);
+  gfx_rect(_bar_x, _row_y, _fill_w, _bar_h);
+
+  // Knob/handle
+  _knob_x = _bar_x + _fill_w;
+  gfx_set(0.90, 0.92, 0.90, 1);
+  gfx_rect(_knob_x - 2, _row_y - 1, 5, _bar_h + 2);
+
+  // Percentage label
+  gfx_setfont(1, "Arial", 8);
+  gfx_set(0.70, 0.90, 0.92, 1);
+  gfx_x = _bar_x + _bar_w + 4;
+  gfx_y = _row_y;
+  sprintf(#_int_pct, "%d%%", (col_intensity * 100 + 0.5)|0);
+  gfx_drawstr(#_int_pct);
+
+  // Drag interaction (ID 260)
+  _slider_id = 260;
+  active_id == _slider_id ? ( LMB ? (
+    col_intensity = max(0.0, min(1.0, (mx - _bar_x) / _bar_w));
+    col_dirty = 1;
+  ) : active_id = -1; );
+  active_id == -1 && mx >= _bar_x - 2 && mx <= _bar_x + _bar_w + 2 &&
+  my >= _row_y - 2 && my <= _row_y + _bar_h + 2 && lmb_down ? (
+    active_id = _slider_id;
+    col_intensity = max(0.0, min(1.0, (mx - _bar_x) / _bar_w));
+    col_dirty = 1;
+  );
+
+  // Return total panel height
+  _row_y + _bar_h + 6 - _cp_y;
+);

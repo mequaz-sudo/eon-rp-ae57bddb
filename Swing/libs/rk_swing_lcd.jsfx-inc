@@ -1,0 +1,508 @@
+// rk_swing_lcd.jsfx-inc
+// Swing right-panel LCD bar: KIT / PAD tabs
+// Phase 2 — v2.1 LCD bar
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+LCD_BAR_H = 130;
+LCD_TAB_H = 22;
+LCD_CONTENT_H = 108;
+
+// ─── LCD bar colors ──────────────────────────────────────────────────────
+lcd_bar_bg_r = 0.05; lcd_bar_bg_g = 0.10; lcd_bar_bg_b = 0.14;
+lcd_bar_tx_r = 0.70; lcd_bar_tx_g = 0.90; lcd_bar_tx_b = 0.92;
+
+// ─── Init ────────────────────────────────────────────────────────────────
+function swing_lcd_init(mem_base)
+local(_base)
+(
+  _base = mem_base;
+  km_lcd = _base; _base += 4 * KS;  // 4 knobs × 16 memory slots (GAIN/PAN/PITCH/OUT)
+  memset(km_lcd, 0, 4 * KS);
+  lcd_right_tab = 0;  // 0=KIT, 1=PAD
+  _base;
+);
+
+// ─── Draw tab row (22px) ─────────────────────────────────────────────────
+function swing_lcd_draw_tabs(_tx, _ty, _tw)
+local(_num_tabs, _tab_w, _tab_h, _ti, _tab_x, _tab_mode, _is_active, _lbl, _tw_m, _th_m)
+(
+  _num_tabs = 2;
+  _tab_h = 18;
+  _tab_w = ((_tw - 8 - (_num_tabs - 1) * 3) / _num_tabs)|0;
+
+  _ti = 0; loop(_num_tabs,
+    _tab_x = _tx + 4 + _ti * (_tab_w + 3);
+    _tab_mode = _ti;
+    _is_active = lcd_right_tab == _tab_mode;
+
+    // Tab background
+    _is_active ? (
+      gfx_set(lcd_bar_tx_r * 0.25, lcd_bar_tx_g * 0.25, lcd_bar_tx_b * 0.25, 0.9);
+    ) : (
+      gfx_set(0.04, 0.07, 0.10, 0.7);
+    );
+    gfx_rect(_tab_x, _ty + 2, _tab_w, _tab_h);
+
+    // Active underline (Swing red)
+    _is_active ? (
+      gfx_set(0.85, 0.20, 0.12, 1);
+      gfx_rect(_tab_x, _ty + 2 + _tab_h - 2, _tab_w, 2);
+    );
+
+    // Tab label
+    _ti == 0 ? _lbl = "KIT" :
+    _lbl = "PAD";
+
+    gfx_setfont(1, "Arial", 9, 'b');
+    _is_active ? (
+      gfx_set(lcd_bar_tx_r, lcd_bar_tx_g, lcd_bar_tx_b, 1);
+    ) : (
+      gfx_set(lcd_bar_tx_r * 0.45, lcd_bar_tx_g * 0.45, lcd_bar_tx_b * 0.45, 0.7);
+    );
+    gfx_measurestr(_lbl, _tw_m, _th_m);
+    gfx_x = _tab_x + (_tab_w - _tw_m) * 0.5;
+    gfx_y = _ty + 2 + (_tab_h - _th_m) * 0.5;
+    gfx_drawstr(_lbl);
+
+    // Click detection
+    lmb_down && mx >= _tab_x && mx < _tab_x + _tab_w &&
+    my >= _ty + 2 && my < _ty + 2 + _tab_h ? (
+      lcd_right_tab = _tab_mode;
+    );
+
+    _ti += 1;
+  );
+);
+
+// ─── LCD mini button helper ──────────────────────────────────────────────
+function _lcd_btn(_bx, _by, _bw, _bh, _blbl, _active)
+local(_hover, _tw_m, _th_m, _clicked)
+(
+  _hover = mx >= _bx && mx < _bx + _bw && my >= _by && my < _by + _bh;
+  _clicked = _hover && lmb_down;
+
+  // Background
+  _active ? (
+    gfx_set(lcd_bar_tx_r * 0.4, lcd_bar_tx_g * 0.4, lcd_bar_tx_b * 0.4, 0.9);
+  ) : _hover ? (
+    gfx_set(lcd_bar_tx_r * 0.2, lcd_bar_tx_g * 0.2, lcd_bar_tx_b * 0.2, 0.7);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.1, lcd_bar_tx_g * 0.1, lcd_bar_tx_b * 0.1, 0.5);
+  );
+  gfx_rect(_bx, _by, _bw, _bh);
+
+  // Border
+  _active ? (
+    gfx_set(lcd_bar_tx_r * 0.7, lcd_bar_tx_g * 0.7, lcd_bar_tx_b * 0.7, 0.8);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.3, lcd_bar_tx_g * 0.3, lcd_bar_tx_b * 0.3, 0.4);
+  );
+  gfx_rect(_bx, _by, _bw, 1);
+  gfx_rect(_bx, _by + _bh - 1, _bw, 1);
+  gfx_rect(_bx, _by, 1, _bh);
+  gfx_rect(_bx + _bw - 1, _by, 1, _bh);
+
+  // Label
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(lcd_bar_tx_r, lcd_bar_tx_g, lcd_bar_tx_b, _active ? 1 : 0.75);
+  gfx_measurestr(_blbl, _tw_m, _th_m);
+  gfx_x = _bx + (_bw - _tw_m) * 0.5;
+  gfx_y = _by + (_bh - _th_m) * 0.5;
+  gfx_drawstr(_blbl);
+
+  _clicked;
+);
+
+// ─── KIT tab content ─────────────────────────────────────────────────────
+function swing_lcd_draw_kit(_cx, _cy, _cw, _ch)
+local(_btn_w, _btn_h, _btn_y, _tw_m, _th_m, _name_x, _name_y)
+(
+  _btn_h = 16;
+  _btn_w = 38;
+
+  // ── Kit name ──
+  _name_x = _cx + 4;
+  _name_y = _cy + 4;
+
+  gfx_setfont(1, "Arial", 11, 'b');
+  gfx_set(lcd_bar_tx_r, lcd_bar_tx_g, lcd_bar_tx_b, 1);
+  strlen(#kit_name) > 0 ? (
+    gfx_x = _name_x; gfx_y = _name_y;
+    gfx_drawstr(#kit_name);
+  ) : (
+    gfx_x = _name_x; gfx_y = _name_y;
+    gfx_set(lcd_bar_tx_r * 0.4, lcd_bar_tx_g * 0.4, lcd_bar_tx_b * 0.4, 0.6);
+    gfx_drawstr("Untitled Kit");
+  );
+
+  // Kit name click to rename
+  gfx_measurestr(strlen(#kit_name) > 0 ? #kit_name : "Untitled Kit", _tw_m, _th_m);
+  lmb_down && mx >= _name_x && mx < _name_x + _tw_m + 10 &&
+  my >= _name_y && my < _name_y + _th_m ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+      gmem[KIT_GMEM_LOCK] = instance_id;
+      gmem[KIT_GMEM_CMD] = 10;  // ask for name
+    );
+  );
+
+);
+
+// ─── PAD tab content ─────────────────────────────────────────────────────
+function swing_lcd_draw_pad(_cx, _cy, _cw, _ch)
+local(_name, _fname, _badge_x, _badge_y, _badge_r, _tw_m, _th_m,
+      _knob_y, _knob_r, _knob_gap, _knob_x, _ki, _nv,
+      _lbl, _val_str, _km_off,
+      _out_val, _stp_w, _stp_h, _stp_x, _stp_y, _arr_w, _resp,
+      _info_y, _info_x, _nn, _oct, _pc, _lcnt,
+      _pill_h, _pill_pad, _pill_gap, _pw)
+(
+  // ── Row 1: Pad badge + name ──
+  _badge_x = _cx + 12;
+  _badge_y = _cy + 10;
+  _badge_r = 8;
+
+  // Pad number badge (red circle)
+  gfx_set(0.85, 0.20, 0.12, 1);
+  gfx_circle(_badge_x, _badge_y, _badge_r, 1);
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  sprintf(#_pad_num, "%d", sel_pad + 1);
+  gfx_measurestr(#_pad_num, _tw_m, _th_m);
+  gfx_x = _badge_x - _tw_m * 0.5;
+  gfx_y = _badge_y - _th_m * 0.5;
+  gfx_drawstr(#_pad_num);
+
+  // Pad name
+  _name = get_cname_slot(sel_pad);
+  _fname = get_name_slot(sel_pad);
+  gfx_setfont(1, "Arial", 11, 'b');
+  gfx_set(lcd_bar_tx_r, lcd_bar_tx_g, lcd_bar_tx_b, 1);
+  gfx_x = _badge_x + _badge_r + 6;
+  gfx_y = _cy + 4;
+  strlen(_name) > 0 ? (
+    gfx_drawstr(_name);
+  ) : strlen(_fname) > 0 ? (
+    gfx_drawstr(_fname);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.35, lcd_bar_tx_g * 0.35, lcd_bar_tx_b * 0.35, 0.5);
+    gfx_drawstr("Empty");
+  );
+
+  // ── Row 2: 4 mini knobs ──
+  _knob_y = _cy + 32;
+  _knob_r = 11;
+  _knob_gap = (_cw - 40) / 4;  // evenly space 4 knobs with margin
+
+  _ki = 0; loop(4,
+    _knob_x = _cx + 20 + _ki * _knob_gap;
+    _km_off = km_lcd + _ki * KS;
+
+    _ki == 0 ? (
+      // GAIN: 0 to 2.0 (displayed as dB-ish)
+      _nv = mpc_knob_interact(_km_off, _knob_x, _knob_y, _knob_r,
+                               p_gain[sel_pad], 0, 2.0, 1.0, 0);
+      _nv != p_gain[sel_pad] ? (
+        p_gain[sel_pad] = _nv;
+        s_dirty[sel_pad] = 1;        // rebuild waveform cache to reflect new gain
+        mark_dirty_pad(sel_pad);
+      );
+      mpc_knob_draw(_knob_x, _knob_y, _knob_r, p_gain[sel_pad], 0, 2.0, 0,
+                    _km_off[0], 0.85, 0.85, 0.20, 0.25, 0.25, 0.25);
+      _lbl = "GAIN";
+    ) : _ki == 1 ? (
+      // PAN: -1 to +1 (symmetric)
+      _nv = mpc_knob_interact(_km_off, _knob_x, _knob_y, _knob_r,
+                               p_pan[sel_pad], -1.0, 1.0, 0, 0);
+      _nv != p_pan[sel_pad] ? (
+        p_pan[sel_pad] = _nv;
+        p_panL[sel_pad] = min(1.0, 1.0 - _nv);
+        p_panR[sel_pad] = min(1.0, 1.0 + _nv);
+        mark_dirty_pad(sel_pad);
+      );
+      mpc_knob_draw(_knob_x, _knob_y, _knob_r, p_pan[sel_pad], -1.0, 1.0, 1,
+                    _km_off[0], 0.20, 0.65, 0.85, 0.25, 0.25, 0.25);
+      _lbl = "PAN";
+    ) : _ki == 2 ? (
+      // PITCH: -24 to +24 semitones
+      _nv = mpc_knob_interact(_km_off, _knob_x, _knob_y, _knob_r,
+                               p_tune[sel_pad], -24, 24, 0, 0);
+      _nv != p_tune[sel_pad] ? (
+        p_tune[sel_pad] = _nv;
+        recalc_pad(sel_pad);
+        mark_dirty_pad(sel_pad);
+      );
+      mpc_knob_draw(_knob_x, _knob_y, _knob_r, p_tune[sel_pad], -24, 24, 1,
+                    _km_off[0], 0.65, 0.40, 0.85, 0.25, 0.25, 0.25);
+      _lbl = "PITCH";
+    ) : (
+      // OUTPUT: color-coded stepper ◄ Out N ►
+      _out_val = p_output[sel_pad];
+      _stp_w = _knob_r * 2 + 8;  // total stepper width
+      _stp_h = 14;
+      _stp_x = _knob_x - _stp_w * 0.5;
+      _stp_y = _knob_y - _stp_h * 0.5;
+      _arr_w = 10;  // arrow button width
+
+      // HSL-colored background pill
+      hsl_to_rgb(_out_val / 16.0, 0.65, 0.22);
+      gfx_set(_hsl_r, _hsl_g, _hsl_b, 0.9);
+      gfx_rect(_stp_x, _stp_y, _stp_w, _stp_h);
+
+      // Left arrow ◄
+      gfx_setfont(1, "Arial", 10, 'b');
+      hsl_to_rgb(_out_val / 16.0, 0.55, 0.65);
+      gfx_set(_hsl_r, _hsl_g, _hsl_b, 0.9);
+      gfx_x = _stp_x + 2; gfx_y = _stp_y + 1;
+      gfx_drawstr("<");
+
+      // Right arrow ►
+      gfx_x = _stp_x + _stp_w - 8; gfx_y = _stp_y + 1;
+      gfx_drawstr(">");
+
+      // Center value text "Out N"
+      gfx_setfont(1, "Arial", 9, 'b');
+      hsl_to_rgb(_out_val / 16.0, 0.75, 0.72);
+      gfx_set(_hsl_r, _hsl_g, _hsl_b, 1);
+      sprintf(#_out_lbl, "Out %d", _out_val + 1);
+      gfx_measurestr(#_out_lbl, _tw_m, _th_m);
+      gfx_x = _knob_x - _tw_m * 0.5;
+      gfx_y = _stp_y + (_stp_h - _th_m) * 0.5;
+      gfx_drawstr(#_out_lbl);
+
+      // Click: left arrow decrements, right arrow increments
+      mx >= _stp_x && mx <= _stp_x + _arr_w && my >= _stp_y && my <= _stp_y + _stp_h && lmb_down ? (
+        p_output[sel_pad] = (_out_val - 1 + 16) % 16;
+        mark_dirty_pad(sel_pad);
+      );
+      mx >= _stp_x + _stp_w - _arr_w && mx <= _stp_x + _stp_w && my >= _stp_y && my <= _stp_y + _stp_h && lmb_down ? (
+        p_output[sel_pad] = (_out_val + 1) % 16;
+        mark_dirty_pad(sel_pad);
+      );
+
+      // Right-click anywhere on stepper: full output menu
+      mx >= _stp_x && mx <= _stp_x + _stp_w && my >= _stp_y && my <= _stp_y + _stp_h && rmb_down ? (
+        _resp = gfx_showmenu("Out 1|Out 2|Out 3|Out 4|Out 5|Out 6|Out 7|Out 8|Out 9|Out 10|Out 11|Out 12|Out 13|Out 14|Out 15|Out 16");
+        _resp > 0 ? ( p_output[sel_pad] = _resp - 1; mark_dirty_pad(sel_pad); );
+      );
+
+      // Scroll wheel on stepper
+      mx >= _stp_x && mx <= _stp_x + _stp_w && my >= _stp_y && my <= _stp_y + _stp_h && frame_wheel != 0 ? (
+        p_output[sel_pad] = (p_output[sel_pad] + sign_of(frame_wheel) + 16) % 16;
+        mark_dirty_pad(sel_pad);
+      );
+
+      _lbl = "OUT";
+    );
+
+    // Knob label
+    gfx_setfont(1, "Arial", 9);
+    gfx_set(lcd_bar_tx_r * 0.85, lcd_bar_tx_g * 0.85, lcd_bar_tx_b * 0.85, 1);
+    gfx_measurestr(_lbl, _tw_m, _th_m);
+    gfx_x = _knob_x - _tw_m * 0.5;
+    gfx_y = _knob_y + _knob_r + 2;
+    gfx_drawstr(_lbl);
+
+    _ki += 1;
+  );
+
+  // ── Row 3: Info strip — pill buttons (MIDI note, choke, layers, reverse) ──
+  _info_y = _knob_y + _knob_r + 18;
+  _pill_h = 20;
+  _pill_pad = 6;   // horizontal padding inside pill
+  _pill_gap = 6;   // gap between pills
+
+  // Thin separator line
+  gfx_set(lcd_bar_tx_r * 0.2, lcd_bar_tx_g * 0.2, lcd_bar_tx_b * 0.2, 0.6);
+  gfx_rect(_cx + 4, _info_y - 4, _cw - 8, 1);
+
+  gfx_setfont(1, "Arial", 10, 'b');
+  _info_x = _cx + 6;
+
+  // ── MIDI note pill ──
+  _nn = p_note[sel_pad];
+  _oct = (_nn / 12)|0 - 1;
+  _pc = _nn % 12;
+  _pc == 0 ? strcpy(#_nn_str, "C") : _pc == 1 ? strcpy(#_nn_str, "C#") :
+  _pc == 2 ? strcpy(#_nn_str, "D") : _pc == 3 ? strcpy(#_nn_str, "D#") :
+  _pc == 4 ? strcpy(#_nn_str, "E") : _pc == 5 ? strcpy(#_nn_str, "F") :
+  _pc == 6 ? strcpy(#_nn_str, "F#") : _pc == 7 ? strcpy(#_nn_str, "G") :
+  _pc == 8 ? strcpy(#_nn_str, "G#") : _pc == 9 ? strcpy(#_nn_str, "A") :
+  _pc == 10 ? strcpy(#_nn_str, "A#") : strcpy(#_nn_str, "B");
+  sprintf(#_note_lbl, "%s%d", #_nn_str, _oct);
+  gfx_measurestr(#_note_lbl, _tw_m, _th_m);
+  _pw = _tw_m + _pill_pad * 2;
+  // Pill background
+  gfx_set(0.10, 0.22, 0.30, 0.9);
+  gfx_rect(_info_x, _info_y, _pw, _pill_h);
+  // Pill text
+  gfx_set(0.45, 0.85, 0.95, 1);
+  gfx_x = _info_x + _pill_pad; gfx_y = _info_y + (_pill_h - _th_m) * 0.5;
+  gfx_drawstr(#_note_lbl);
+  // Interaction
+  mx >= _info_x && mx <= _info_x + _pw && my >= _info_y && my <= _info_y + _pill_h ? (
+    // Hover highlight
+    gfx_set(0.45, 0.85, 0.95, 0.12);
+    gfx_rect(_info_x, _info_y, _pw, _pill_h);
+    frame_wheel != 0 && !p_note_lock[sel_pad] ? (
+      p_note[sel_pad] = max(0, min(127, p_note[sel_pad] + sign_of(frame_wheel)));
+      mark_dirty_pad(sel_pad);
+    );
+    lmb_down && !p_note_lock[sel_pad] ? (
+      p_note[sel_pad] = max(0, min(127, p_note[sel_pad] + 1));
+      mark_dirty_pad(sel_pad);
+    );
+    rmb_down && !p_note_lock[sel_pad] ? (
+      p_note[sel_pad] = max(0, min(127, p_note[sel_pad] - 1));
+      mark_dirty_pad(sel_pad);
+    );
+  );
+  _info_x += _pw + _pill_gap;
+
+  // ── Choke group pill ──
+  p_choke[sel_pad] > 0 ? (
+    sprintf(#_chk_lbl, "CHK %d", p_choke[sel_pad]);
+  ) : (
+    strcpy(#_chk_lbl, "CHOKE");
+  );
+  gfx_measurestr(#_chk_lbl, _tw_m, _th_m);
+  _pw = _tw_m + _pill_pad * 2;
+  // Pill background
+  p_choke[sel_pad] > 0 ? (
+    gfx_set(0.30, 0.08, 0.08, 0.9);
+  ) : (
+    gfx_set(0.10, 0.10, 0.12, 0.7);
+  );
+  gfx_rect(_info_x, _info_y, _pw, _pill_h);
+  // Pill text
+  p_choke[sel_pad] > 0 ? (
+    gfx_set(0.95, 0.40, 0.35, 1);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.45, lcd_bar_tx_g * 0.45, lcd_bar_tx_b * 0.45, 0.7);
+  );
+  gfx_x = _info_x + _pill_pad; gfx_y = _info_y + (_pill_h - _th_m) * 0.5;
+  gfx_drawstr(#_chk_lbl);
+  // Click: popup menu
+  mx >= _info_x && mx <= _info_x + _pw && my >= _info_y && my <= _info_y + _pill_h ? (
+    p_choke[sel_pad] > 0 ? gfx_set(0.95, 0.40, 0.35, 0.12) : gfx_set(1, 1, 1, 0.06);
+    gfx_rect(_info_x, _info_y, _pw, _pill_h);
+    lmb_down ? (
+      _resp = gfx_showmenu("Off|Group 1|Group 2|Group 3|Group 4|Group 5|Group 6|Group 7|Group 8");
+      _resp > 0 ? ( p_choke[sel_pad] = _resp - 1; mark_dirty_pad(sel_pad); );
+    );
+  );
+  _info_x += _pw + _pill_gap;
+
+  // ── Layer count pill ──
+  _lcnt = p_layer_cnt[sel_pad];
+  _lcnt == 0 && s_len[sel_pad] > 0 ? _lcnt = 1;
+  _lcnt > 0 ? (
+    sprintf(#_lay_lbl, "%d LYR", _lcnt);
+  ) : (
+    strcpy(#_lay_lbl, "0 LYR");
+  );
+  gfx_measurestr(#_lay_lbl, _tw_m, _th_m);
+  _pw = _tw_m + _pill_pad * 2;
+  // Pill background
+  gfx_set(0.08, 0.15, 0.08, 0.8);
+  gfx_rect(_info_x, _info_y, _pw, _pill_h);
+  // Pill text
+  _lcnt > 0 ? (
+    gfx_set(0.55, 0.90, 0.40, 1);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.3, lcd_bar_tx_g * 0.3, lcd_bar_tx_b * 0.3, 0.5);
+  );
+  gfx_x = _info_x + _pill_pad; gfx_y = _info_y + (_pill_h - _th_m) * 0.5;
+  gfx_drawstr(#_lay_lbl);
+  _info_x += _pw + _pill_gap;
+
+  // ── Reverse toggle pill ──
+  p_reverse[sel_pad] ? (
+    strcpy(#_rev_lbl, "REV");
+  ) : (
+    strcpy(#_rev_lbl, "FWD");
+  );
+  gfx_measurestr(#_rev_lbl, _tw_m, _th_m);
+  _pw = _tw_m + _pill_pad * 2;
+  // Pill background
+  p_reverse[sel_pad] ? (
+    gfx_set(0.22, 0.06, 0.28, 0.9);
+  ) : (
+    gfx_set(0.10, 0.10, 0.12, 0.7);
+  );
+  gfx_rect(_info_x, _info_y, _pw, _pill_h);
+  // Pill text
+  p_reverse[sel_pad] ? (
+    gfx_set(0.80, 0.35, 0.95, 1);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.4, lcd_bar_tx_g * 0.4, lcd_bar_tx_b * 0.4, 0.65);
+  );
+  gfx_x = _info_x + _pill_pad; gfx_y = _info_y + (_pill_h - _th_m) * 0.5;
+  gfx_drawstr(#_rev_lbl);
+  // Click to toggle
+  mx >= _info_x && mx <= _info_x + _pw && my >= _info_y && my <= _info_y + _pill_h ? (
+    p_reverse[sel_pad] ? gfx_set(0.80, 0.35, 0.95, 0.12) : gfx_set(1, 1, 1, 0.06);
+    gfx_rect(_info_x, _info_y, _pw, _pill_h);
+    lmb_down ? (
+      p_reverse[sel_pad] = !p_reverse[sel_pad];
+      s_dirty[sel_pad] = 1; mark_dirty_pad(sel_pad);
+    );
+  );
+  _info_x += _pw + _pill_gap;
+
+  // ── L↔R channel swap pill ──
+  p_swapLR[sel_pad] ? strcpy(#_rev_lbl, "L<>R") : strcpy(#_rev_lbl, "L R");
+  gfx_measurestr(#_rev_lbl, _tw_m, _th_m);
+  _pw = _tw_m + _pill_pad * 2;
+  p_swapLR[sel_pad] ? (
+    gfx_set(0.06, 0.22, 0.28, 0.9);  // active: teal-ish
+  ) : (
+    gfx_set(0.10, 0.10, 0.12, 0.7);
+  );
+  gfx_rect(_info_x, _info_y, _pw, _pill_h);
+  p_swapLR[sel_pad] ? (
+    gfx_set(0.35, 0.85, 0.95, 1);
+  ) : (
+    gfx_set(lcd_bar_tx_r * 0.4, lcd_bar_tx_g * 0.4, lcd_bar_tx_b * 0.4, 0.65);
+  );
+  gfx_x = _info_x + _pill_pad; gfx_y = _info_y + (_pill_h - _th_m) * 0.5;
+  gfx_drawstr(#_rev_lbl);
+  // Click to toggle
+  mx >= _info_x && mx <= _info_x + _pw && my >= _info_y && my <= _info_y + _pill_h ? (
+    p_swapLR[sel_pad] ? gfx_set(0.35, 0.85, 0.95, 0.12) : gfx_set(1, 1, 1, 0.06);
+    gfx_rect(_info_x, _info_y, _pw, _pill_h);
+    lmb_down ? (
+      p_swapLR[sel_pad] = !p_swapLR[sel_pad];
+      mark_dirty_pad(sel_pad);
+    );
+  );
+);
+
+
+// ─── Main LCD bar draw ───────────────────────────────────────────────────
+function swing_lcd_draw(_lx, _ly, _lw, _lh)
+local(_cx, _cy, _cw, _ch)
+(
+  // Background
+  gfx_set(lcd_bar_bg_r, lcd_bar_bg_g, lcd_bar_bg_b, 1);
+  gfx_rect(_lx, _ly, _lw, _lh);
+
+  // Subtle border
+  gfx_set(0.02, 0.06, 0.08, 1);
+  gfx_rect(_lx, _ly + _lh - 1, _lw, 1);  // bottom edge
+  gfx_set(0.12, 0.18, 0.22, 0.5);
+  gfx_rect(_lx, _ly, _lw, 1);  // top highlight
+
+  // Tab row
+  swing_lcd_draw_tabs(_lx, _ly, _lw);
+
+  // Content area
+  _cx = _lx + 2;
+  _cy = _ly + LCD_TAB_H;
+  _cw = _lw - 4;
+  _ch = _lh - LCD_TAB_H;
+
+  lcd_right_tab == 0 ? swing_lcd_draw_kit(_cx, _cy, _cw, _ch);
+  lcd_right_tab == 1 ? swing_lcd_draw_pad(_cx, _cy, _cw, _ch);
+);

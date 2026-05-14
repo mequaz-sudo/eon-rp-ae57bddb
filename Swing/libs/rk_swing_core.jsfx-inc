@@ -1,0 +1,746 @@
+// rk_swing_core.jsfx-inc
+// Swing core utility functions: name/path slots, sample loading, voice launch
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+// ─── Undo dirty markers ──────────────────────────────────────────────────
+// REAPER captures the FX chunk for undo only when a slider VALUE actually
+// changes, and coalesces rapid changes to the SAME slider into one undo
+// entry. Tukan/Saike give every parameter its own slider so cross-action
+// changes never coalesce.
+//
+// Swing keeps per-pad state in freemem arrays (not sliders), so we use
+// counter sliders as proxies:
+//   slider3        → global / master changes (mark_dirty())
+//   slider6..21    → per-pad changes (mark_dirty_pad(idx))
+//
+// "Mute pad 1, solo pad 3, raise pad 12 vol" → slider6, slider8, slider17
+// → 3 separate undo entries even when fast (different sliders never
+// coalesce). Within a single pad, fast changes still coalesce (a knob
+// drag = 1 entry, not 60), which is the desired DAW UX.
+//
+// Defined at the top of rk_swing_core.jsfx-inc so it's available to all
+// libs imported after this one (which is everything else under libs/).
+function mark_dirty() (
+  slider3 = (slider3 + 1) % 1000000;
+  slider_automate(slider3);
+);
+
+// Per-pad dirty marker. pad_idx is 0-based; routes to slider(6 + pad_idx)
+// — slider6 = pad 1, slider21 = pad 16. Out-of-range falls through to
+// the global slider3 so accidental mis-callers don't crash.
+function mark_dirty_pad(pad_idx)
+local(_sn)
+(
+  pad_idx >= 0 && pad_idx < NUM_PADS ? (
+    _sn = 6 + pad_idx;
+    slider(_sn) = (slider(_sn) + 1) % 1000000;
+    slider_automate(slider(_sn));
+  ) : (
+    mark_dirty();
+  );
+);
+
+// ─── Name / path string arrays ───────────────────────────────────────────
+function get_name_slot(idx) (
+  idx==0?#pn0:idx==1?#pn1:idx==2?#pn2:idx==3?#pn3:
+  idx==4?#pn4:idx==5?#pn5:idx==6?#pn6:idx==7?#pn7:
+  idx==8?#pn8:idx==9?#pn9:idx==10?#pn10:idx==11?#pn11:
+  idx==12?#pn12:idx==13?#pn13:idx==14?#pn14:#pn15;
+);
+function get_path_slot(idx) (
+  idx==0?#pp0:idx==1?#pp1:idx==2?#pp2:idx==3?#pp3:
+  idx==4?#pp4:idx==5?#pp5:idx==6?#pp6:idx==7?#pp7:
+  idx==8?#pp8:idx==9?#pp9:idx==10?#pp10:idx==11?#pp11:
+  idx==12?#pp12:idx==13?#pp13:idx==14?#pp14:#pp15;
+);
+function get_cname_slot(idx) (
+  idx==0?#cn0:idx==1?#cn1:idx==2?#cn2:idx==3?#cn3:
+  idx==4?#cn4:idx==5?#cn5:idx==6?#cn6:idx==7?#cn7:
+  idx==8?#cn8:idx==9?#cn9:idx==10?#cn10:idx==11?#cn11:
+  idx==12?#cn12:idx==13?#cn13:idx==14?#cn14:#cn15;
+);
+
+// ─── Multi-instance browser routing ─────────────────────────────────────
+// Returns 1 when this JSFX instance is the one the browser is currently
+// bound to (or no browser is active). Use as a guard before:
+//   - processing CMD 63/64 sample loads from the browser
+//   - writing browser-sync gmem fields (window size, kit name, etc.)
+//   - consuming GS_PAD_SELECT_REQ
+// Without this, a second Swing instance would respond to the first
+// instance's browser commands and overwrite shared gmem state.
+//
+// Browser publishes the active instance ID into KIT_GMEM_INSTANCE on
+// session start, on instance picker selection, and clears it on close.
+// 0 means "no specific instance / single-instance mode" — any JSFX may act.
+function _is_browser_target() (
+  // Strict: only true when the user has explicitly picked this instance.
+  // The earlier permissive form (also true on INSTANCE==0) caused every
+  // Swing in the project to race-write the same gmem slots, which made
+  // the browser pad grid + names flicker / blank out unpredictably.
+  // Now: no pick = no writes. The browser auto-picks the first alive
+  // instance on open, so single-instance workflows still "just work".
+  gmem[KIT_GMEM_INSTANCE] == instance_id;
+);
+
+// ─── Kit-import format detection ─────────────────────────────────────────
+// Returns 1 if the path ends in .sfz (case-insensitive) — the only kit
+// format Swing imports. Hands the file off to the Lua bridge's import
+// pipeline (parse_sfz in Swing_Browser.lua).
+function _is_kit_import_ext(p) local(_pl, _i, _ch) (
+  _pl = strlen(p);
+  _pl < 4 ? 0 : (
+    strcpy(#_kie_tmp, p);
+    _i = 0; loop(_pl,
+      _ch = str_getchar(#_kie_tmp, _i);
+      _ch >= 65 && _ch <= 90 ? str_setchar(#_kie_tmp, _i, _ch + 32);
+      _i += 1;
+    );
+    match("*.sfz", #_kie_tmp);
+  );
+);
+
+// Hand a kit-import file path to the Lua bridge by writing it to the
+// shared GS_BROWSER_PATH region (same protocol the browser uses for sample
+// loads, just JSFX→bridge instead of bridge→JSFX). Bridge picks up CMD 18,
+// stores the path in ExtState, and opens the browser which runs import_start.
+// Caller must check bridge alive + CMD idle before calling.
+function _send_kit_import_to_bridge(p) local(_pl, _ci) (
+  _pl = strlen(p);
+  _pl > 0 && _pl < GS_BROWSER_PATH_MAX ? (
+    _ci = 0; loop(_pl,
+      gmem[GS_BROWSER_PATH + _ci] = str_getchar(p, _ci);
+      _ci += 1;
+    );
+    gmem[GS_BROWSER_PATH_LEN] = _pl;
+    gmem[KIT_GMEM_CMD] = 18;
+  );
+);
+
+// ─── Auto-name pad from filename keywords (Sitala-style) ─────────────────
+function auto_name_from_file(pad_idx)
+local(_fn, _cn, _i, _ch, _len, _last_dot)
+(
+  // Use the actual filename (sans extension) as the pad name. The previous
+  // keyword-matching approach (kick.wav → "Kick") collapsed distinct samples
+  // into the same generic label — for media-explorer drag-drop and arbitrary
+  // sample names, the filename is the identifying signal the user wants in
+  // the top-right corner.
+  _fn = get_name_slot(pad_idx);
+  _cn = get_cname_slot(pad_idx);
+  _len = strlen(_fn);
+  _len > 0 ? (
+    strcpy(_cn, _fn);
+    // Strip extension (last '.' onward) — walk backward, scope to the last
+    // segment so a path like "808 v1.5/kick.wav" only loses ".wav".
+    _last_dot = -1;
+    _i = 0; loop(_len,
+      _ch = str_getchar(_cn, _i);
+      _ch == 46 ? _last_dot = _i;  // '.' = 46
+      _i += 1;
+    );
+    _last_dot > 0 ? str_setlen(_cn, _last_dot);
+  );
+);
+
+// ─── Sync pad names + notes to MIDI editor via Lua bridge (CMD 52) ───────
+function sync_note_names()
+local(_ki, _cn, _cnl, _cj)
+(
+  gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 &&
+  (gmem[KIT_GMEM_LOCK] == 0 || gmem[KIT_GMEM_LOCK] == instance_id) ? (
+    gmem[KIT_GMEM_LOCK] = instance_id;  // acquire instance lock
+    // Write all pad names to gmem PADNAME area
+    _ki = 0; loop(NUM_PADS,
+      _cn = get_cname_slot(_ki);
+      _cnl = strlen(_cn);
+      _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+        gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] =
+          _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+        _cj += 1;
+      );
+      // Write note number to metadata area (already mapped)
+      gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 10] = p_note[_ki];
+      // Write actual audio length (non-layered) or sentinel 1 (layered).
+      // Browser still detects "has audio" via non-zero check; bridge gets
+      // the real length it needs for gmem-fallback streaming.
+      gmem[KIT_GMEM_AUDIOLEN + _ki] =
+        s_len[_ki] > 0 ? s_len[_ki] :
+        (pad_has_audio(_ki) ? 1 : 0);
+      _ki += 1;
+    );
+    gmem[KIT_GMEM_CMD] = 52;
+  );
+);
+
+
+// ─── Clear a single layer slot ──────────────────────────────────────────
+function clear_layer(pad_idx, layer_idx) local(_lidx, li) (
+  _lidx = pad_idx * MAX_LAYERS + layer_idx;
+  l_len[_lidx] = 0;
+  l_start[_lidx] = 0;
+  l_end[_lidx] = 1.0;
+  l_sr[_lidx] = 0;
+  l_norm[_lidx] = 0;
+  l_norm_gain[_lidx] = 1.0;
+  l_vel_lo[_lidx] = layer_idx / MAX_LAYERS;
+  l_vel_hi[_lidx] = (layer_idx + 1) / MAX_LAYERS;
+  l_rr_order[_lidx] = layer_idx;
+  l_gain[_lidx] = 1.0;
+  strcpy(LPATH_STR_BASE + _lidx, "");
+  memset(s_audio_start + pad_idx * SLOT_SIZE + layer_idx * LAYER_SIZE, 0, LAYER_SIZE);
+  // Recalculate layer count (find highest non-empty layer)
+  p_layer_cnt[pad_idx] = 0;
+  li = 0; loop(MAX_LAYERS,
+    l_len[pad_idx * MAX_LAYERS + li] > 0 ? p_layer_cnt[pad_idx] = li + 1;
+    li += 1;
+  );
+);
+
+// ─── Clear entire pad (all layers + legacy + name/path) ─────────────────
+function clear_pad(i) local(li) (
+  s_len[i] = 0; s_start[i] = 0; s_end[i] = 1.0;
+  s_sr[i] = 0; s_norm[i] = 0; s_norm_gain[i] = 1.0;
+  s_dirty[i] = 1;
+  strcpy(get_name_slot(i), "");
+  strcpy(get_path_slot(i), "");
+  strcpy(get_cname_slot(i), "");
+  p_layer_cnt[i] = 0;
+  p_layer_mode[i] = 3;
+  li = 0; loop(MAX_LAYERS, clear_layer(i, li); li += 1;);
+  // Reset FX to defaults
+  fx_hpf_freq[i] = 20; fx_lpf_freq[i] = 20000;
+  fx_eq_lo[i] = 0; fx_eq_mid[i] = 0; fx_eq_hi[i] = 0;
+  fx_eq_lo_freq[i] = 200; fx_eq_mid_freq[i] = 1000; fx_eq_hi_freq[i] = 5000;
+  fx_sat_drv[i] = 0; fx_drv_mode[i] = 0;
+  fx_bc_rate[i] = 0; fx_bc_bits[i] = 16;
+  fx_snd_dly[i] = 0; fx_snd_rvb[i] = 0;
+  s_skip[i] = 0; p_reverse[i] = 0; p_swapLR[i] = 0; p_stereo[i] = 0; p_oneshot[i] = -1; p_choke[i] = 0;
+  p_gain[i] = 1.0; p_pan[i] = 0; p_tune[i] = 0; p_sample_offset[i] = 0;
+  p_mute[i] = 0; p_solo[i] = 0;
+  p_color[i] = i / 16.0;  // default: evenly-spaced hue, matches @init in
+                          // Swing_ReaKit.jsfx:423. Was 0 (= hue red), which
+                          // made every pad/mixer strip red after Clear Kit.
+  mark_dirty();
+);
+
+// ─── Waveform-aware ADSR analysis ─────────────────────────────────────────
+// Derives ADSR parameters from actual waveform shape. Runs at load time
+// (never in @sample — sqrt is intentional and safe here).
+// buf     = interleaved stereo buffer pointer (L0,R0,L1,R1,...)
+// buf_len = total floats in buffer (stereo frames = buf_len/2)
+// buf_sr  = buffer sample rate
+// pad_idx = pad index to write ADSR results to
+function analyze_adsr(buf, buf_len, buf_sr, pad_idx)
+local(_tot_frames, _dur_ms, _win_frames, _win_interleaved, _win_ms,
+      _num_wins, _w, _fi, _sum, _rms_buf,
+      _peak_rms, _peak_win, _post_peak,
+      _tail_start, _sus_sum, _sus_cnt, _sus_rms, _sus,
+      _body_start, _body_end, _body_sum, _body_cnt, _body_avg,
+      _dec_tgt, _dec_win, _dec_found,
+      _rel_tgt, _rel_win,
+      _atk_ms, _dec_ms, _rel_ms, _is_percussive)
+(
+  _tot_frames = (buf_len / 2)|0;
+  _dur_ms     = _tot_frames / max(1, buf_sr) * 1000.0;
+
+  // Too short — percussive defaults, no analysis
+  _tot_frames < 128 || _dur_ms < 10 ? (
+    p_attack[pad_idx]  = 0.1;
+    p_decay[pad_idx]   = 50;
+    p_sustain[pad_idx] = 1.0;  // drum sampler: one-shots play through at full amplitude
+    p_release[pad_idx] = 30;
+    p_adsr_user[pad_idx] = 0;  // analyzer owns these values
+    recalc_pad(pad_idx);
+  ) : (
+
+    // Adaptive window size: cover the FULL sample in up to 200 windows
+    // Short samples (~100ms): ~5ms windows. Long samples (5s): ~25ms windows.
+    _win_frames      = max((buf_sr * 0.005)|0, (_tot_frames / 200)|0);
+    _win_interleaved = _win_frames * 2;
+    _win_ms          = _win_frames / max(1, buf_sr) * 1000.0;
+    _num_wins        = max(1, min(200, (buf_len / _win_interleaved)|0));
+
+    // RMS scratch — reuse _swap_tmp_buf (safe: swap never runs during load)
+    _rms_buf  = _swap_tmp_buf;
+    _peak_rms = 0.00001;
+    _peak_win = 0;
+
+    // ── Per-window RMS (mono mix L+R / 2) ────────────────────────
+    _w = 0;
+    loop(_num_wins,
+      _sum = 0;
+      _fi  = _w * _win_interleaved;
+      loop(_win_frames,
+        _sum += ((buf[_fi] + buf[_fi+1]) * 0.5) * ((buf[_fi] + buf[_fi+1]) * 0.5);
+        _fi  += 2;
+      );
+      _rms_buf[_w] = sqrt(_sum / max(1, _win_frames));
+      _rms_buf[_w] > _peak_rms ? (
+        _peak_rms = _rms_buf[_w];
+        _peak_win = _w;
+      );
+      _w += 1;
+    );
+
+    // Edge case: silent buffer — conservative middle defaults
+    _peak_rms < 0.0001 ? (
+      p_attack[pad_idx]  = 5;
+      p_decay[pad_idx]   = 500;
+      p_sustain[pad_idx] = 1.0;  // drum sampler: one-shots play through at full amplitude
+      p_release[pad_idx] = 300;
+      p_adsr_user[pad_idx] = 0;  // analyzer owns these values
+      recalc_pad(pad_idx);
+    ) : (
+
+      // ── Attack: time from start to peak window ────────────────
+      _atk_ms = max(0.1, min(500.0, _peak_win * _win_ms));
+      _post_peak = _num_wins - _peak_win - 1;
+
+      // ── Sustain: body energy (middle 30-70%) vs peak ──────────
+      // This is the "held" level — how loud the sound is during its body
+      _body_start = _peak_win + 1 + max(1, (_post_peak * 0.3)|0);
+      _body_end   = _peak_win + 1 + max(2, (_post_peak * 0.7)|0);
+      _body_start = min(_body_start, _num_wins - 1);
+      _body_end   = min(_body_end, _num_wins);
+      _body_sum = 0; _body_cnt = 0;
+      _w = _body_start;
+      loop(_body_end - _body_start,
+        _w < _num_wins ? ( _body_sum += _rms_buf[_w]; _body_cnt += 1; );
+        _w += 1;
+      );
+      _body_avg = _body_cnt > 0 ? (_body_sum / _body_cnt) : 0;
+      _sus      = max(0.0, min(1.0, _body_avg / _peak_rms));
+
+      // ── Decay: peak → where RMS reaches the body/sustain level ─
+      // Use sustain-relative target: find where sound settles to its body
+      _dec_tgt   = _body_avg + (_peak_rms - _body_avg) * 0.15;  // 15% above body
+      _dec_tgt   = max(_dec_tgt, _peak_rms * 0.10);  // floor: -20dB from peak
+      _dec_win   = _num_wins - 1;
+      _dec_found = 0;
+      _w = _peak_win + 1;
+      loop(_post_peak,
+        !_dec_found && _w < _num_wins ? (
+          _rms_buf[_w] <= _dec_tgt ? (
+            _dec_win = _w; _dec_found = 1;
+          );
+        );
+        _w += 1;
+      );
+      !_dec_found ? (
+        // Sustained sound — decay = 80% of remaining duration
+        _dec_ms = max(10.0, min(5000.0, _post_peak * _win_ms * 0.8));
+      ) : (
+        _dec_ms = max(1.0, min(5000.0, (_dec_win - _peak_win) * _win_ms));
+      );
+
+      // ── Release: scan from end backwards for last window > 5% peak ─
+      _rel_tgt = _peak_rms * 0.05;
+      _rel_win = _num_wins - 1;
+      _w = _num_wins - 1;
+      loop(_num_wins,
+        _w >= 0 && _rms_buf[_w] >= _rel_tgt ? (
+          _rel_win = _w;
+          _w = -1;  // break
+        );
+        _w -= 1;
+      );
+      _rel_ms = max(5.0, min(2000.0, (_num_wins - 1 - _rel_win) * _win_ms));
+      // Floor: 10% of duration up to 50ms — prevents click on voice kill
+      _rel_ms = max(_rel_ms, min(50.0, _dur_ms * 0.1));
+
+      // ── Write results ─────────────────────────────────────────
+      p_attack[pad_idx]  = _atk_ms;
+      p_decay[pad_idx]   = _dec_ms;
+      // Sustain: percussive vs sustained heuristic.
+      //   Percussive (kick/snare/hat): body-RMS/peak-RMS is near zero, which
+      //   would clamp the post-decay tail to ~5% and gut the sample. So for
+      //   short bursts or front-loaded transients we force S=1.0 (the sample
+      //   plays through at full amplitude — sustain is meaningless when the
+      //   audio is already over by the time decay finishes).
+      //   Sustained (pads/loops/vocal hits): body has real energy; the
+      //   computed _sus reflects the actual held level. Floor at 0.10 so
+      //   even quiet sustained sources don't disappear.
+      _is_percussive = _dur_ms < 250 || (_peak_win < _num_wins * 0.05 && _dur_ms < 1000);
+      _is_percussive ? (
+        p_sustain[pad_idx] = 1.0;
+      ) : (
+        p_sustain[pad_idx] = max(0.10, _sus);
+      );
+      p_release[pad_idx] = _rel_ms;
+      p_adsr_user[pad_idx] = 0;  // analyzer owns these values
+      recalc_pad(pad_idx);
+    );
+  );
+);
+
+// ─── Sample loader ────────────────────────────────────────────────────────
+function load_from_path(idx, path_str)
+local(f, nch, file_sr, i, char, last_p, tbuf, tname, tpath, peak, val, _lidx, _wl)
+(
+  idx >= 0 && idx < NUM_PADS ? (
+    s_len[idx] = 0;  // reset before load; stays 0 if load fails
+    s_sr[idx]  = 0;
+    tbuf  = s_audio_start + idx * SLOT_SIZE;
+    tname = get_name_slot(idx);
+    tpath = get_path_slot(idx);
+    strcpy(tpath, path_str);
+    f = file_open(tpath);
+    f >= 0 ? (
+      file_riff(f, nch, file_sr);
+      nch > 0 && nch < 3 ? (
+        s_sr[idx] = file_sr > 0 ? file_sr : srate;
+        memset(tbuf, 0, SLOT_SIZE);
+        nch == 2 ? s_len[idx] = file_mem(f, tbuf, SLOT_SIZE);
+        nch == 1 ? (
+          s_len[idx] = min((file_avail(f) * 2)|0, SLOT_SIZE);
+          s_len[idx] = s_len[idx] - (s_len[idx] % 2);  // force even
+          i = 0; loop(s_len[idx] / 2,
+            file_var(f, val);
+            tbuf[i] = val; tbuf[i+1] = val;
+            i += 2;
+          );
+        );
+        // Normalization gain
+        peak = 0.00001; i = 0; loop(s_len[idx],
+          val = abs(tbuf[i]); val > peak ? peak = val; i += 1;
+        );
+        s_norm_gain[idx] = 1.0;
+        peak > 0.000001 ? ( s_norm_gain[idx] = min(1.0 / peak, 100.0); );
+        // Extract filename
+        last_p = -1; i = 0;
+        while((char = str_getchar(path_str, i)) > 0) (
+          (char == '/' || char == 92) ? last_p = i; i += 1;
+        );
+        last_p >= 0 ? strcpy_from(tname, tpath, last_p + 1) : strcpy(tname, tpath);
+        // Auto-name pad from filename keywords
+        auto_name_from_file(idx);
+        // Auto-promote to layer 0 so layered modes (Sum/VelSplit/RR) always work.
+        // Single-sample load is authoritative: force pad to exactly 1 layer and
+        // wipe stale layers 1..MAX_LAYERS-1. This is critical when the pad was
+        // previously part of a loaded kit with multiple layers — without this,
+        // p_layer_cnt persists at (e.g.) 4 and Sum-mode voice launch divides
+        // gain by sqrt(_active_cnt) because the old layers' l_len metadata is
+        // still nonzero even though their audio buffers were just memset'd.
+        // That's the "load a new sample after a kit and it's quieter" bug.
+        s_len[idx] > 0 ? (
+          _lidx = idx * MAX_LAYERS;
+          l_len[_lidx]       = min(s_len[idx], LAYER_SIZE);
+          l_start[_lidx]     = s_start[idx];
+          l_end[_lidx]       = s_end[idx];
+          l_sr[_lidx]        = s_sr[idx];
+          l_norm[_lidx]      = s_norm[idx];
+          l_norm_gain[_lidx] = s_norm_gain[idx];
+          l_gain[_lidx]      = 1.0;
+          l_vel_lo[_lidx]    = 0;
+          l_vel_hi[_lidx]    = 1.0;
+          // Wipe layers 1..MAX_LAYERS-1 so they don't count as active in Sum mode
+          _wl = 1;
+          loop(MAX_LAYERS - 1,
+            l_len[idx * MAX_LAYERS + _wl]       = 0;
+            l_start[idx * MAX_LAYERS + _wl]     = 0;
+            l_end[idx * MAX_LAYERS + _wl]       = 1.0;
+            l_sr[idx * MAX_LAYERS + _wl]        = 0;
+            l_norm[idx * MAX_LAYERS + _wl]      = 0;
+            l_norm_gain[idx * MAX_LAYERS + _wl] = 1.0;
+            l_gain[idx * MAX_LAYERS + _wl]      = 1.0;
+            l_vel_lo[idx * MAX_LAYERS + _wl]    = _wl / MAX_LAYERS;
+            l_vel_hi[idx * MAX_LAYERS + _wl]    = (_wl + 1) / MAX_LAYERS;
+            strcpy(LPATH_STR_BASE + idx * MAX_LAYERS + _wl, "");
+            _wl += 1;
+          );
+          p_layer_cnt[idx]   = 1;
+          p_layer_mode[idx]  = 3;  // Sum mode = safe default for 1 layer
+        );
+        // Build waveform thumbnail
+        s_dirty[idx] = 1;
+        // Waveform-aware ADSR — derive from actual transient/body/tail shape.
+        // Skip when the user has manually tuned this pad's ADSR (p_adsr_user=1):
+        // dropping a new sample on a tuned pad keeps the user's A/D/S/R intact.
+        // Right-click on the ADSR overlay forces re-analysis (clears the flag).
+        !p_adsr_user[idx] ? (
+          analyze_adsr(tbuf, s_len[idx], s_sr[idx], idx);
+        );
+      );
+      file_close(f);  // always close regardless of nch
+    );
+  );
+);
+
+function load_layer_from_path(pad_idx, layer_idx, path_str)
+local(f, nch, file_sr, i, val, tbuf, _lidx, peak, _ln_name, _ln_path, _ln_lastp, _ln_i, _ln_ch, _adsr_dur_ms, _adsr_prev_cnt)
+(
+  pad_idx >= 0 && pad_idx < NUM_PADS && layer_idx >= 0 && layer_idx < MAX_LAYERS ? (
+    _adsr_prev_cnt = p_layer_cnt[pad_idx];  // snapshot before update
+    _lidx = pad_idx * MAX_LAYERS + layer_idx;
+    // Full reset before attempting load (prevents stale state on failure)
+    l_len[_lidx] = 0;
+    l_start[_lidx] = 0;
+    l_end[_lidx] = 1.0;
+    l_sr[_lidx] = 0;
+    l_norm[_lidx] = 0;
+    l_norm_gain[_lidx] = 1.0;
+    l_vel_lo[_lidx] = 0;
+    l_vel_hi[_lidx] = 1.0;
+    l_rr_order[_lidx] = layer_idx;
+    l_gain[_lidx] = 1.0;
+    tbuf = s_audio_start + pad_idx * SLOT_SIZE + layer_idx * LAYER_SIZE;
+    // Store layer file path for serialization
+    strcpy(LPATH_STR_BASE + _lidx, path_str);
+    f = file_open(path_str);
+    f >= 0 ? (
+      file_riff(f, nch, file_sr);
+      nch > 0 && nch < 3 ? (
+        l_sr[_lidx] = file_sr > 0 ? file_sr : srate;
+        memset(tbuf, 0, LAYER_SIZE);
+        nch == 2 ? l_len[_lidx] = min(file_mem(f, tbuf, LAYER_SIZE), LAYER_SIZE);
+        nch == 1 ? (
+          l_len[_lidx] = min((file_avail(f) * 2)|0, LAYER_SIZE);
+          l_len[_lidx] = l_len[_lidx] - (l_len[_lidx] % 2);
+          i = 0; loop(l_len[_lidx] / 2,
+            file_var(f, val);
+            tbuf[i] = val; tbuf[i+1] = val;
+            i += 2;
+          );
+        );
+        // Normalization gain
+        peak = 0.00001; i = 0; loop(l_len[_lidx],
+          val = abs(tbuf[i]); val > peak ? peak = val; i += 1;
+        );
+        l_norm_gain[_lidx] = 1.0;
+        peak > 0.000001 ? ( l_norm_gain[_lidx] = min(1.0 / peak, 100.0); );
+        l_start[_lidx] = 0;
+        l_end[_lidx] = 1.0;
+        // Update pad layer count
+        p_layer_cnt[pad_idx] < layer_idx + 1 ? p_layer_cnt[pad_idx] = layer_idx + 1;
+        // Auto-name pad from first layer's filename (layer 0 only)
+        layer_idx == 0 ? (
+          _ln_name = get_name_slot(pad_idx);
+          _ln_path = get_path_slot(pad_idx);
+          strcpy(_ln_path, path_str);
+          // Extract filename from path
+          _ln_lastp = -1; _ln_i = 0;
+          while((_ln_ch = str_getchar(path_str, _ln_i)) > 0) (
+            (_ln_ch == 47 || _ln_ch == 92) ? _ln_lastp = _ln_i; _ln_i += 1;
+          );
+          _ln_lastp >= 0 ? strcpy_from(_ln_name, _ln_path, _ln_lastp + 1) : strcpy(_ln_name, _ln_path);
+          auto_name_from_file(pad_idx);
+
+          // Waveform-aware ADSR — only on empty pads (don't overwrite existing envelope)
+          _adsr_prev_cnt == 0 ? (
+            analyze_adsr(tbuf, l_len[_lidx], l_sr[_lidx], pad_idx);
+          );
+        );
+        s_dirty[pad_idx] = 1;  // rebuild waveform cache after layer load
+      );
+      file_close(f);
+    );
+  );
+);
+
+// ─── Waveform cache builder ─────────────────────────────────────────────
+function build_wv_cache(idx) local(buf, step, i, _wi, val, si, ptr, ptr_R, _wlen, _wsg, _lidx, _wli, _stereo_found, _louder, _quieter, _cum_diff, _cum_signal, _vL, _vR, _eL, _eR) (
+  // Cache stores raw waveform shape only. User mix knobs (p_gain, l_gain)
+  // are NOT applied — they're shown by their own knobs and would push the
+  // wave outside the pad bounds. ADSR is NOT applied — the FX overlay
+  // draws it as a separate curve. The only multiplier is normalize gain,
+  // which describes the sample's intrinsic loudness so quiet samples still
+  // fill the pad.
+  p_layer_cnt[idx] > 0 ? (
+    _wli = 0;
+    while(_wli < p_layer_cnt[idx] && l_len[idx * MAX_LAYERS + _wli] <= 0) ( _wli += 1; );
+    _wli >= p_layer_cnt[idx] ? _wli = 0; // fallback to 0 if all empty
+    _lidx = idx * MAX_LAYERS + _wli;
+    _wlen = l_len[_lidx];
+    buf = s_audio_start + idx * SLOT_SIZE + _wli * LAYER_SIZE;
+    _wsg = l_norm[_lidx] ? l_norm_gain[_lidx] : 1.0;
+  ) : (
+    _wlen = s_len[idx];
+    buf = s_audio_start + idx * SLOT_SIZE;
+    _wsg = s_norm[idx] ? s_norm_gain[idx] : 1.0;
+  );
+  _wlen > 0 ? (
+    ptr   = wv_cache   + idx * WV_RES;
+    ptr_R = wv_cache_R + idx * WV_RES;
+    step = (_wlen / 2) / WV_RES;
+    // Stereo detection — two checks must both pass for stereo render:
+    //
+    //   1. Relative L/R difference: cumulative |L-R| > 10% of total
+    //      louder-channel signal. Catches the "kick stored as stereo
+    //      with L≈R" case — old per-sample EPS=1e-5 fired on noise
+    //      floor and rendered two near-identical halves that visually
+    //      merged into one waveform wrapping around. Mirror of the
+    //      browser-side check in Swing_Browser.lua build_peaks().
+    //
+    //   2. Channel-balance: quieter channel >= 30% (≈ -10.5 dB) of
+    //      louder. Catches "bass file with one silent channel" — would
+    //      render with half flat, looks broken. Force mono in that case
+    //      so the louder channel fills the pad.
+    _cum_diff = 0; _cum_signal = 0;
+    _eL = 0; _eR = 0;  // per-channel cumulative |amp| (energy proxy)
+    i = 0; loop(WV_RES,
+      _wi = p_reverse[idx] ? (WV_RES - 1 - i) : i;
+      si = ((_wi * step)|0) * 2;
+      _vL = buf[si];
+      _vR = buf[si + 1];
+      ptr  [i] = _vL * _wsg;
+      ptr_R[i] = _vR * _wsg;
+      _eL += abs(_vL);
+      _eR += abs(_vR);
+      _cum_diff   += abs(_vL - _vR);
+      _cum_signal += max(abs(_vL), abs(_vR));
+      i += 1;
+    );
+    _stereo_found = _cum_signal > 0.001 && (_cum_diff / _cum_signal) >= 0.10;
+    // Channel-balance check by ENERGY (not peak). Peak-based missed
+    // kicks where R had occasional loud spikes (passing 30% peak)
+    // but was mostly silent (low RMS). Energy = cumulative |amp| ≈
+    // area under the curve, mirrors what the user perceives as
+    // "this channel carries content". 30% energy threshold matches
+    // the browser preview's check in Swing_Browser.lua build_peaks().
+    _louder  = max(_eL, _eR);
+    _quieter = min(_eL, _eR);
+    // 30% (≈ -10.5 dB) — matches browser preview's calibrated value.
+    p_stereo[idx] = _stereo_found && (_louder < 0.001 || (_quieter / _louder) >= 0.30);
+    s_dirty[idx] = 0;
+  );
+);
+
+// ─── Voice launch helper (eliminates triplication across note-on + repeats) ──
+function launch_voices_for_pad(_lv_pad, _lv_vel, _lv_flash)
+  local(_is_sum, _sum_cnt, _sum_cur, _active_cnt, _sel_layer, _skip_voice, vi, _lidx,
+        _slen, _sstart, _send, _ssr, max_age, _oldest_vi, j, _delay, _end_i, _start_i,
+        _lv_choke) (
+  // Only mode 3 (Sum) stacks all layers; mode 0 uses single-layer selection
+  _is_sum = p_layer_cnt[_lv_pad] > 0 && p_layer_mode[_lv_pad] == 3;
+  // Count active (non-empty) layers for gain compensation
+  _active_cnt = 0;
+  _is_sum ? (
+    j = 0; loop(p_layer_cnt[_lv_pad],
+      l_len[_lv_pad * MAX_LAYERS + j] > 0 ? _active_cnt += 1;
+      j += 1;
+    );
+  );
+  _sum_cnt = _is_sum ? p_layer_cnt[_lv_pad] : 1;
+  _sum_cur = 0;
+  while(_sum_cur < _sum_cnt) (
+    _is_sum ? (
+      _sel_layer = _sum_cur;
+      _skip_voice = l_len[_lv_pad * MAX_LAYERS + _sel_layer] <= 0;
+    ) : (
+      p_layer_cnt[_lv_pad] > 0 ? (
+        _sel_layer = select_layer(_lv_pad, _lv_vel / 127.0, p_layer_mode[_lv_pad]);
+        _skip_voice = 0;
+      ) : (
+        _sel_layer = -1;
+        _skip_voice = 0;
+      );
+    );
+    !_skip_voice ? (
+      // Find free voice or oldest for steal (single pass)
+      vi = -1; max_age = -1; _oldest_vi = -1;
+      j = 0; loop(MAX_VOICES,
+        v_pos[j] < 0 && v_stage[j] == 0 ? (
+          vi < 0 ? vi = j;  // take first free slot
+        ) : (
+          v_age[j] > max_age ? (max_age = v_age[j]; _oldest_vi = j;);
+        );
+        j += 1;
+      );
+      vi < 0 ? ( vi = _oldest_vi; );  // no free voice — steal oldest
+      // Steal: vi points at an in-use voice that needs to be replaced
+      vi >= 0 && (v_pos[vi] >= 0 || v_stage[vi] > 0) ? (
+        // If stolen voice was still waiting (negative v_pos, pre-delay), just kill it
+        v_pos[vi] < 0 ? (
+          v_pos[vi] = -1; v_env[vi] = 0; v_stage[vi] = 0;
+        ) : (
+          v_slot[MAX_VOICES] = v_slot[vi]; v_pos[MAX_VOICES] = v_pos[vi];
+          v_startpos[MAX_VOICES] = v_startpos[vi];
+          v_gain[MAX_VOICES] = v_gain[vi];
+          v_env[MAX_VOICES] = v_env[vi]; v_note[MAX_VOICES] = v_note[vi];
+          v_inc[MAX_VOICES] = v_inc[vi]; v_decay_ct[MAX_VOICES] = 0;
+          v_sg[MAX_VOICES] = v_sg[vi]; v_layer[MAX_VOICES] = v_layer[vi];
+          v_stage[MAX_VOICES] = 4; // LAST — audio thread gate
+        );
+      );
+      vi >= 0 ? (
+        v_slot[vi] = _lv_pad;
+        _sel_layer >= 0 && p_layer_cnt[_lv_pad] > 0 ? (
+          v_layer[vi] = _sel_layer;
+          _lidx = _lv_pad * MAX_LAYERS + _sel_layer;
+          _slen = l_len[_lidx];
+          _sstart = l_start[_lidx];
+          _send = l_end[_lidx];
+          _ssr = l_sr[_lidx];
+        ) : (
+          v_layer[vi] = 0;
+          _slen = s_len[_lv_pad];
+          _sstart = s_start[_lv_pad];
+          _send = s_end[_lv_pad];
+          _ssr = s_sr[_lv_pad];
+        );
+        // Clamp start/end to safe interleaved range (SILENCE_T margin for interpolation)
+        _end_i = min(_send * _slen, _slen) - SILENCE_T;
+        _end_i = max(0, _end_i);
+        _start_i = max(0, min(_sstart * _slen, _end_i));
+        // Skip launch if sample too short for safe playback
+        _slen > SILENCE_T + 4 ? (
+        p_reverse[_lv_pad] ? (
+          v_pos[vi] = _end_i;
+          v_inc[vi] = -pow(2.0, p_tune[_lv_pad] / 12.0) * 2.0 * (_ssr > 0 ? _ssr / srate : 1.0);
+        ) : (
+          v_pos[vi] = _start_i;
+          v_inc[vi] = pow(2.0, p_tune[_lv_pad] / 12.0) * 2.0 * (_ssr > 0 ? _ssr / srate : 1.0);
+        );
+        // Apply sample offset — absolute position in sample, clamped to trim bounds
+        p_sample_offset[_lv_pad] > 0.001 ? (
+          _abs_ofs = p_sample_offset[_lv_pad] * _slen;
+          v_pos[vi] = max(_start_i, min(_end_i, _abs_ofs));
+        );
+        // Sum mode loose timing: delay non-primary layers by random 0-40 samples
+        // Store real start position so delayed voice resumes at correct trim point
+        v_startpos[vi] = v_pos[vi];
+        _is_sum && _sum_cur > 0 && p_sum_tight[_lv_pad] > 0.001 ? (
+          _delay = (rand(40) * p_sum_tight[_lv_pad])|0;
+          _delay > 0 ? v_pos[vi] = -_delay;
+        );
+        v_gain[vi] = apply_vel_curve(_lv_vel / 127.0, vel_curve);
+        // Sum mode: compensate gain by active (non-empty) layer count
+        _is_sum && _active_cnt > 1 ? ( v_gain[vi] = v_gain[vi] / sqrt(_active_cnt); );
+        v_note[vi] = p_note[_lv_pad];
+        v_age[vi] = 0;
+        v_env[vi] = 0;
+        v_decay_ct[vi] = 0;
+        _sel_layer >= 0 && p_layer_cnt[_lv_pad] > 0 ? (
+          _lidx = _lv_pad * MAX_LAYERS + _sel_layer;
+          v_sg[vi] = p_gain[_lv_pad] * l_gain[_lidx] * (l_norm[_lidx] ? l_norm_gain[_lidx] : 1.0);
+        ) : (
+          v_sg[vi] = p_gain[_lv_pad] * (s_norm[_lv_pad] ? s_norm_gain[_lv_pad] : 1.0);
+        );
+        // v_stage MUST be set last — audio thread uses it as the gate condition.
+        // Setting it before v_env/v_sg causes a race where @sample reads stale values.
+        v_stage[vi] = 1;
+        ) : ( // _slen too short — kill voice
+          v_pos[vi] = -1; v_env[vi] = 0; v_stage[vi] = 0;
+        );
+      );
+    );
+    _sum_cur += 1;
+  );
+  pad_flash[_lv_pad] = _lv_flash;
+  // Duplicate-kill + choke group (single pass)
+  // Duplicate-kill: choke voices on same pad younger than lockout window
+  // Choke group: kill voices on other pads sharing the same choke group
+  _lv_choke = p_choke[_lv_pad];
+  j = 0; loop(MAX_VOICES,
+    v_pos[j] >= 0 && v_age[j] > 0 ? (
+      v_slot[j] == _lv_pad ? (
+        v_age[j] < _retrig_lockout ? ( v_stage[j] = 4; );  // duplicate-kill
+      ) : (
+        _lv_choke > 0 && p_choke[v_slot[j]] == _lv_choke ? ( v_stage[j] = 4; );  // choke group
+      );
+    );
+    j += 1;
+  );
+);

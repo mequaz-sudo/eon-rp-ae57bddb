@@ -1,0 +1,53 @@
+// rk_swing_warnings.jsfx-inc
+// LCD-area warning banner overlays (bridge missing, ReaImGui missing,
+// first-run welcome). Each is a mutually-exclusive full-LCD overlay with
+// a title line + subtitle line, dismissable via click.
+// (c) EON Studios — All Rights Reserved
+//
+// Usage from rk_swing_ui_state.jsfx-inc (or wherever the LCD area is
+// drawn). The caller controls WHEN each banner is visible (gating on
+// state flags) — this file just provides the consistent rendering and
+// click-detection.
+//
+//   swing_warning_overlay("Title", "Subtitle line", title_r, title_g, title_b);
+//
+// Returns 1 if the user clicked this frame, 0 otherwise. Caller uses
+// the return value to update the appropriate dismissal state:
+//
+//   swing_warning_overlay(...) ? kit_bridge_warn = 0;
+//
+// Caller is responsible for the mutual-exclusion ternary chain (so
+// banners don't stack visually). See rk_swing_ui_state.jsfx-inc for
+// the canonical caller pattern.
+
+@init
+
+// Render a centered warning overlay over the LCD area. Returns
+// (lmb_down || rmb_down) so the caller can chain a dismiss action.
+// String params (title, subtitle) accept literal strings OR #named
+// string handles — EEL2 passes both as numeric handles.
+function swing_warning_overlay(title, subtitle, title_r, title_g, title_b)
+local(tw, th)
+(
+  gfx_set(0, 0, 0, 0.75);
+  gfx_rect(lcd_x, lcd_y + 18, lcd_w, lcd_h - 18);
+
+  // Title line — bold, given color
+  gfx_setfont(1, "Arial", 11, 'b');
+  gfx_set(title_r, title_g, title_b, 1);
+  gfx_measurestr(title, tw, th);
+  gfx_x = lcd_x + (lcd_w - tw) / 2;
+  gfx_y = lcd_y + (lcd_h - th) / 2 - 12;
+  gfx_drawstr(title);
+
+  // Subtitle line — regular, light gray
+  gfx_setfont(1, "Arial", 9, 0);
+  gfx_set(0.75, 0.73, 0.70, 1);
+  gfx_measurestr(subtitle, tw, th);
+  gfx_x = lcd_x + (lcd_w - tw) / 2;
+  gfx_y = lcd_y + (lcd_h - th) / 2 + 4;
+  gfx_drawstr(subtitle);
+
+  // Implicit return value — caller can use as a click test
+  lmb_down || rmb_down;
+);

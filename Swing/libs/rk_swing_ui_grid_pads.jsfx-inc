@@ -1,0 +1,929 @@
+// rk_swing_ui_grid_pads.jsfx-inc
+// Swing pad grid: embedded 4×4 view, main pad grid + controls, drag-swap
+// Extracted from rk_swing_ui_grid.jsfx-inc — zero behavioral change
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function swing_grid_draw_embedded() (
+  gfx_set(bg_r, bg_g, bg_b, 1); gfx_rect(0, 0, gfx_w, gfx_h);  // cream background
+  e_cw = (gfx_w / 4)|0;
+  e_ch = (gfx_h / 4)|0;
+  e_gap = 1;  // tight hairline gaps — hardware drum machine look
+  e_font = max(14, (min(e_cw, e_ch) / 4)|0);  // larger font for big pads
+  grow = 0;
+  loop(4,
+    gcol = 0;
+    loop(4,
+      gi = (3 - grow) * 4 + gcol;
+      ex_ = gcol * e_cw + e_gap;
+      ey_ = grow * e_ch + e_gap;
+      ew_ = e_cw - e_gap * 2;
+      eh_ = e_ch - e_gap * 2;
+      _cb = gi * 3; pr = col_rgba[_cb]; pgg = col_rgba[_cb+1]; pb = col_rgba[_cb+2];
+      is_muted = p_mute[gi] || (any_solo && !p_solo[gi]);
+      has_sample = pad_has_audio(gi);
+
+      // Pad face — full color, iMPC style
+      has_sample ? (
+        is_muted ? ( gfx_set(pr * 0.35 + 0.15, pgg * 0.35 + 0.15, pb * 0.35 + 0.15, 1); )
+                 : ( gfx_set(pr * 0.75 + 0.12, pgg * 0.75 + 0.12, pb * 0.75 + 0.12, 1); );
+      ) : (
+        gfx_set(pad_bg_r, pad_bg_g, pad_bg_b, 1);
+      );
+      gfx_rect(ex_, ey_, ew_, eh_);
+
+      // Waveform thumbnail — ADSR pre-baked into wv_cache. Stereo files
+      // (L != R content) render as two distinct waveforms (Tukan-style:
+      // top half = L, bottom half = R, each in their own half-pane).
+      // Mono files render as a single classic centered waveform — keeps
+      // the legacy look for drum kits, which are usually mono.
+      // p_stereo is detected during build_wv_cache from the audio data,
+      // so it's accurate regardless of source format (a stereo file with
+      // mono content displays as mono — no fake "two identical waves").
+      has_sample && ew_ > 16 ? (
+        ptr   = wv_cache   + gi * WV_RES;
+        ptr_R = wv_cache_R + gi * WV_RES;
+        wv_a = is_muted ? 0.25 : 0.50;
+        gfx_set(1, 1, 1, wv_a);
+        p_stereo[gi] ? (
+          _wv_scale = eh_ * 0.20;
+          _wv_clamp = eh_ * 0.22;
+          _wy_topc  = ey_ + eh_ * 0.25;
+          _wy_botc  = ey_ + eh_ * 0.75;
+          j = 0; loop(WV_RES,
+            wx = ex_ + (j / WV_RES) * ew_;
+            amp_L = min(_wv_clamp, abs(ptr  [j]) * _wv_scale);
+            amp_R = min(_wv_clamp, abs(ptr_R[j]) * _wv_scale);
+            gfx_line(wx, _wy_topc - amp_L, wx, _wy_topc + amp_L);
+            gfx_line(wx, _wy_botc - amp_R, wx, _wy_botc + amp_R);
+            j += 1;
+          );
+        ) : (
+          _wv_scale = eh_ * 0.40;
+          _wv_clamp = eh_ * 0.45;
+          wy = ey_ + eh_ * 0.5;
+          j = 0; loop(WV_RES,
+            wx = ex_ + (j / WV_RES) * ew_;
+            amp = min(_wv_clamp, abs(ptr[j]) * _wv_scale);
+            gfx_line(wx, wy - amp, wx, wy + amp);
+            j += 1;
+          );
+        );
+      );
+
+      // ── Selected pad red border (embedded) ──
+      gi == sel_pad ? (
+        gfx_set(0.85, 0.20, 0.12, 0.9);
+        gfx_rect(ex_ - 1, ey_ - 1, ew_ + 2, 2);      // top
+        gfx_rect(ex_ - 1, ey_ + eh_ - 1, ew_ + 2, 2); // bottom
+        gfx_rect(ex_ - 1, ey_ - 1, 2, eh_ + 2);       // left
+        gfx_rect(ex_ + ew_ - 1, ey_ - 1, 2, eh_ + 2); // right
+      );
+
+      // Flash
+      pad_flash[gi] > 0 ? (
+        gfx_set(1, 1, 1, pad_flash[gi] / 8.0 * 0.6);
+        gfx_rect(ex_, ey_, ew_, eh_);
+        pad_flash[gi] -= 1;
+      );
+
+      // Level meter (stereo L+R bars, left edge) — wider on big pads
+      e_mtr_w = max(3, (ew_ / 50)|0);
+      e_mtr_h_max = eh_ - 6;
+      _mL = min(1.0, pad_meterL[gi]); _mR = min(1.0, pad_meterR[gi]);
+      _mL_fill = (_mL * e_mtr_h_max)|0; _mR_fill = (_mR * e_mtr_h_max)|0;
+      gfx_set(0, 0, 0, 0.25);
+      gfx_rect(ex_ + 2, ey_ + 3, e_mtr_w * 2 + 1, e_mtr_h_max);
+      _mL_fill > 0 ? (
+        _mL < 0.7 ? gfx_set(0.2, 0.85, 0.3, 0.80) :
+        _mL < 0.9 ? gfx_set(0.85, 0.85, 0.2, 0.80) :
+                     gfx_set(0.85, 0.2, 0.2, 0.80);
+        gfx_rect(ex_ + 2, ey_ + 3 + e_mtr_h_max - _mL_fill, e_mtr_w, _mL_fill);
+      );
+      _mR_fill > 0 ? (
+        _mR < 0.7 ? gfx_set(0.2, 0.85, 0.3, 0.80) :
+        _mR < 0.9 ? gfx_set(0.85, 0.85, 0.2, 0.80) :
+                     gfx_set(0.85, 0.2, 0.2, 0.80);
+        gfx_rect(ex_ + 2 + e_mtr_w + 1, ey_ + 3 + e_mtr_h_max - _mR_fill, e_mtr_w, _mR_fill);
+      );
+      max(_mL, _mR) > 0.95 ? (
+        gfx_set(1, 0.15, 0.1, 0.9);
+        gfx_rect(ex_ + 2, ey_ + 2, e_mtr_w * 2 + 1, 2);
+      );
+
+      // Note name (top-left)
+      gfx_setfont(1, "Arial", max(9, (e_font * 0.65)|0), 0);
+      _nn = p_note[gi]; _oct = (_nn / 12)|0 - 1; _semi = _nn % 12;
+      _semi == 0  ? strcpy(#_note, "C")  :
+      _semi == 1  ? strcpy(#_note, "C#") :
+      _semi == 2  ? strcpy(#_note, "D")  :
+      _semi == 3  ? strcpy(#_note, "D#") :
+      _semi == 4  ? strcpy(#_note, "E")  :
+      _semi == 5  ? strcpy(#_note, "F")  :
+      _semi == 6  ? strcpy(#_note, "F#") :
+      _semi == 7  ? strcpy(#_note, "G")  :
+      _semi == 8  ? strcpy(#_note, "G#") :
+      _semi == 9  ? strcpy(#_note, "A")  :
+      _semi == 10 ? strcpy(#_note, "A#") :
+                    strcpy(#_note, "B");
+      sprintf(#_nn_str, "%s%d", #_note, _oct);
+      gfx_set(1, 1, 1, is_muted ? 0.65 : 0.75);
+      gfx_x = ex_ + 4; gfx_y = ey_ + 3; gfx_drawstr(#_nn_str);
+
+      // Pad name or number (top-right)
+      gfx_set(1, 1, 1, is_muted ? 0.60 : 0.80);
+      gfx_setfont(1, "Arial", max(12, e_font - 2), 'b');
+      _cn = get_cname_slot(gi);
+      strlen(_cn) > 0 ? strcpy(#_ep, _cn) : sprintf(#_ep, "%d", gi + 1);
+      gfx_measurestr(#_ep, tw, th);
+      gfx_x = ex_ + ew_ - tw - 2; gfx_y = ey_ + 1; gfx_drawstr(#_ep);
+
+      // Pad number (bottom-left) — canonical pad ID for future REAPER DB matching.
+      // Placed past the stereo level meter at the left edge.
+      gfx_setfont(1, "Arial", max(11, (e_font * 0.55)|0), 'b');
+      gfx_set(1, 1, 1, is_muted ? 0.50 : 0.80);
+      sprintf(#_e_pn, "%d", gi + 1);
+      gfx_measurestr(#_e_pn, _e_pn_tw, _e_pn_th);
+      gfx_x = ex_ + 4 + (e_mtr_w * 2 + 1) + 3;
+      gfx_y = ey_ + eh_ - _e_pn_th - 3;
+      gfx_drawstr(#_e_pn);
+
+      // Output bus selector (bottom-right, clickable) — always visible
+      gfx_setfont(1, "Arial", max(10, e_font - 3), 'b');
+      gfx_set(1, 1, 1, is_muted ? 0.45 : 0.75);
+      sprintf(#_ob, "Out %d", p_output[gi] + 1);
+      gfx_measurestr(#_ob, tw, th);
+      _eout_lx = ex_ + ew_ - tw - 4; _eout_ly = ey_ + eh_ - th - 4;
+      gfx_x = _eout_lx; gfx_y = _eout_ly; gfx_drawstr(#_ob);
+
+      // Mini VOL knob (center-bottom of embedded pad, toggleable)
+      _e_knob_active = 0;
+      _e_knob_hover = 0;
+      embed_show_knobs ? (
+        _e_mini_kr = max(8, min(14, (min(e_cw, e_ch) / 10)|0));
+        _e_vol_cx = ex_ + (ew_ / 2)|0;
+        _e_knob_cy = ey_ + eh_ - _e_mini_kr - 6;
+
+        // VOL knob — draw BEFORE interact (interact modifies gfx state)
+        _km_v = km_pad_vol_pan + (gi * KM_PAD_MINI + 0) * KS;
+        has_sample ? (
+          mpc_knob_draw(_e_vol_cx, _e_knob_cy, _e_mini_kr, p_gain[gi], 0, 2.0, 0, _km_v[0],
+                        0.75, 0.73, 0.70, pad_bg_r*(1-dim)+pr*dim, pad_bg_g*(1-dim)+pgg*dim, pad_bg_b*(1-dim)+pb*dim);
+        );
+        nv = mpc_knob_interact(_km_v, _e_vol_cx, _e_knob_cy, _e_mini_kr, p_gain[gi], 0, 2.0, 1.0, 0);
+        nv != p_gain[gi] ? (p_gain[gi] = nv; s_dirty[gi] = 1; mark_dirty_pad(gi););
+        _km_v[1] ? _e_knob_active = 1;
+        _e_knob_hover = _e_knob_active || dist(mx, my, _e_vol_cx, _e_knob_cy) <= _e_mini_kr + 3;
+      );
+
+      // Output bus dropdown click (check before pad trigger)
+      _eout_clicked = 0;
+      mx >= _eout_lx && mx <= _eout_lx + tw + 2 && my >= _eout_ly && my <= _eout_ly + th + 2 && lmb_down ? (
+        resp = gfx_showmenu("Out 1|Out 2|Out 3|Out 4|Out 5|Out 6|Out 7|Out 8|Out 9|Out 10|Out 11|Out 12|Out 13|Out 14|Out 15|Out 16");
+        resp > 0 ? ( p_output[gi] = resp - 1; mark_dirty_pad(gi); );
+        _eout_clicked = 1;
+      );
+
+      // (right-click menu removed — REAPER eats RMB in embedded mode)
+      // Settings button drawn after the pad loop instead
+
+      // Click to trigger via full voice launch (same path as MIDI, supports Sum/RR/VelSplit)
+      mx >= ex_ && mx <= ex_ + ew_ && my >= ey_ && my <= ey_ + eh_ && lmb_down && !_eout_clicked && !_e_knob_hover ? (
+        pad_has_audio(gi) ? (
+          launch_voices_for_pad(gi, 127, 8);
+          p_held[gi] = 1; p_held_vel[gi] = 127; gui_held_pad = gi;
+        );
+      );
+
+      // Drag-to-load
+      mx >= ex_ && mx <= ex_ + ew_ && my >= ey_ && my <= ey_ + eh_ && gfx_getdropfile(0, #df) ? (
+        // .sfz files route through the Lua bridge import pipeline instead of
+        // being treated as audio (load_from_path would silently fail on a
+        // text-based SFZ file).
+        _is_kit_import_ext(#df) && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+          _send_kit_import_to_bridge(#df);
+        ) : (
+          // Tukan-style undo: let REAPER's automatic chunk-diff capture
+          // the load via the mark_dirty() call below. Audio is
+          // already embedded in @serialize (ser_ver >= 12), so the
+          // chunk diff includes the audio change. NO Undo_BeginBlock
+          // dance — the previous CMD 46/48 protocol opened blocks that
+          // got closed by the leak-timer with empty diffs, breaking
+          // Ctrl+Z. Removing it lets REAPER do its own thing.
+          drop_gi = gi; drop_idx = 0;
+          while(gfx_getdropfile(drop_idx, #df) && drop_gi < NUM_PADS) (
+            // Reset per-pad mix params so stale kit values don't leak
+            // into the new sample. Lighter than full clear_pad which
+            // caused voice tripling when used here.
+            p_gain[drop_gi] = 1.0; p_pan[drop_gi] = 0; p_tune[drop_gi] = 0;
+            p_panL[drop_gi] = 1.0; p_panR[drop_gi] = 1.0;
+            s_start[drop_gi] = 0; s_end[drop_gi] = 1.0;
+            load_from_path(drop_gi, #df);
+            recalc_pad(drop_gi); s_dirty[drop_gi] = 1;
+            drop_gi += 1; drop_idx += 1;
+          );
+          mark_dirty_pad(gi); sync_note_names();
+          col_dirty = 1; // re-derive auto-color from dropped samples
+        );
+        gfx_getdropfile(-1);
+      );
+
+      gcol += 1;
+    );
+    grow += 1;
+  );
+
+  // (embed settings button is in the main window header instead)
+);
+
+function swing_grid_draw_shadow() (
+  gfx_set(0.15, 0.14, 0.13, 0.5);
+  gfx_rect(right_x - 2, 28, 1, gfx_h - 28);
+  gfx_set(0.95, 0.93, 0.90, 0.15);
+  gfx_rect(right_x - 1, 28, 1, gfx_h - 28);
+);
+
+function swing_grid_draw_pads() (
+  grid_x  = right_x + 4;
+  grid_y  = 28 + LCD_BAR_H + 4;  // below header + LCD bar
+  grid_w  = right_w - 8;
+  grid_h  = gfx_h - 28 - LCD_BAR_H - 8;  // minus header, LCD bar, margin
+  cell_w  = (grid_w / 4)|0;
+  cell_h  = (grid_h / 4)|0;
+  btn_h   = 20;  // S/M + V/P buttons below pad
+  pad_h   = max(30, cell_h - btn_h - 8);
+
+  // ── Draw 4×4 pad grid ─────────────────────────────────────────────────
+  // Pad well background (slightly darker cream for contrast)
+  gfx_set(pad_well_r * 0.95, pad_well_g * 0.95, pad_well_b * 0.95, 1);
+  gfx_rect(grid_x, grid_y, grid_w, grid_h);
+
+  // MPC layout: row 0 (top) = pads 12-15, row 3 (bottom) = pads 0-3
+  grow = 0;
+  loop(4,
+  gcol = 0;
+  loop(4,
+    gi = (3 - grow) * 4 + gcol;
+    cx  = grid_x + gcol * cell_w;
+    cy  = grid_y + grow * cell_h;
+    pw  = cell_w - 4;
+    ph  = pad_h;
+
+    _cb = gi * 3; pr = col_rgba[_cb]; pgg = col_rgba[_cb+1]; pb = col_rgba[_cb+2];
+    has_sample = pad_has_audio(gi);
+    is_muted = p_mute[gi] || (any_solo && !p_solo[gi]);
+
+    // ── iMPC rubber pad (grey with 3D depth, rounded corners) ─────────
+    pad_x = cx + 2; pad_y = cy + 2;
+    _rd = 4;  // corner radius for rounded rects
+
+    // Enhanced drop shadow (darker, offset by 2px instead of 3)
+    gfx_set(0.20, 0.18, 0.15, 0.5);
+    gfx_rect(pad_x + 2, pad_y + 2, pw, ph);
+
+    // Pad face — full color when assigned, grey when empty
+    has_sample ? (
+      is_muted ? ( _pr = pr * 0.35 + 0.15; _pgg = pgg * 0.35 + 0.15; _pb = pb * 0.35 + 0.15; )
+               : ( _pr = pr * 0.75 + 0.12; _pgg = pgg * 0.75 + 0.12; _pb = pb * 0.75 + 0.12; );
+    ) : (
+      _pr = pad_bg_r; _pgg = pad_bg_g; _pb = pad_bg_b;
+    );
+    gfx_set(_pr, _pgg, _pb, 1);
+    gfx_rect(pad_x, pad_y, pw, ph);
+
+    // Rounded corner mask — paint well color into the 4 corners
+    gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+    // TL corner
+    gfx_rect(pad_x, pad_y, _rd, 1); gfx_rect(pad_x, pad_y, 1, _rd);
+    gfx_rect(pad_x, pad_y, 3, 2); gfx_rect(pad_x, pad_y, 2, 3);
+    // TR corner
+    gfx_rect(pad_x + pw - _rd, pad_y, _rd, 1); gfx_rect(pad_x + pw - 1, pad_y, 1, _rd);
+    gfx_rect(pad_x + pw - 3, pad_y, 3, 2); gfx_rect(pad_x + pw - 2, pad_y, 2, 3);
+    // BL corner
+    gfx_rect(pad_x, pad_y + ph - 1, _rd, 1); gfx_rect(pad_x, pad_y + ph - _rd, 1, _rd);
+    gfx_rect(pad_x, pad_y + ph - 2, 3, 2); gfx_rect(pad_x, pad_y + ph - 3, 2, 3);
+    // BR corner
+    gfx_rect(pad_x + pw - _rd, pad_y + ph - 1, _rd, 1); gfx_rect(pad_x + pw - 1, pad_y + ph - _rd, 1, _rd);
+    gfx_rect(pad_x + pw - 3, pad_y + ph - 2, 3, 2); gfx_rect(pad_x + pw - 2, pad_y + ph - 3, 2, 3);
+
+    // Enhanced 3D bevel — stronger highlights/shadows (rubber depth)
+    // Top/left highlight (stronger)
+    gfx_set(1, 1, 1, 0.20);
+    gfx_rect(pad_x + _rd, pad_y, pw - _rd * 2, 1);    // top edge
+    gfx_rect(pad_x, pad_y + _rd, 1, ph - _rd * 2);    // left edge
+
+    // Subtle inner shadow at top (darker line)
+    gfx_set(0, 0, 0, 0.10);
+    gfx_rect(pad_x + _rd, pad_y + 1, pw - _rd * 2, 1);
+
+    // Bottom/right shadow (stronger)
+    gfx_set(0, 0, 0, 0.20);
+    gfx_rect(pad_x + _rd, pad_y + ph - 1, pw - _rd * 2, 1);  // bottom edge
+    gfx_rect(pad_x + pw - 1, pad_y + _rd, 1, ph - _rd * 2);  // right edge
+
+    // ── Selected pad red border ──
+    gi == sel_pad ? (
+      gfx_set(0.85, 0.20, 0.12, 0.9);
+      gfx_rect(pad_x - 1, pad_y - 1, pw + 2, 2);
+      gfx_rect(pad_x - 1, pad_y + ph - 1, pw + 2, 2);
+      gfx_rect(pad_x - 1, pad_y - 1, 2, ph + 2);
+      gfx_rect(pad_x + pw - 1, pad_y - 1, 2, ph + 2);
+    );
+
+    // "PAD N" label — on empty pads: centered, on loaded pads: small bottom-right
+    gfx_setfont(1, "Arial", has_sample ? 7 : 9, 'b');
+    sprintf(#_plab, "PAD %d", gi + 1);
+    gfx_measurestr(#_plab, tw, th);
+    has_sample ? (
+      gfx_set(1, 1, 1, is_muted ? 0.15 : 0.30);
+      gfx_x = pad_x + pw - tw - 3; gfx_y = pad_y + ph - th - 2; gfx_drawstr(#_plab);
+    ) : (
+      gfx_set(0.38, 0.37, 0.35, 0.65);
+      gfx_x = pad_x + (pw - tw) / 2; gfx_y = pad_y + (ph - th) / 2; gfx_drawstr(#_plab);
+    );
+
+    // Waveform thumbnail — stereo (L != R content) renders top=L bottom=R
+    // (Tukan-style); mono renders single classic centered waveform.
+    has_sample ? (
+      ptr   = wv_cache   + gi * WV_RES;
+      ptr_R = wv_cache_R + gi * WV_RES;
+      wv_a = is_muted ? 0.20 : 0.55;
+      gfx_set(1, 1, 1, wv_a);
+      p_stereo[gi] ? (
+        _wv_scale = ph * 0.20;
+        _wy_topc  = pad_y + ph * 0.24;
+        _wy_botc  = pad_y + ph * 0.72;
+        j = 0; loop(WV_RES,
+          wx = pad_x + 4 + ((j / WV_RES) * (pw - 8));
+          amp_L = abs(ptr  [j]) * _wv_scale;
+          amp_R = abs(ptr_R[j]) * _wv_scale;
+          gfx_line(wx, _wy_topc - amp_L, wx, _wy_topc + amp_L);
+          gfx_line(wx, _wy_botc - amp_R, wx, _wy_botc + amp_R);
+          j += 1;
+        );
+      ) : (
+        _wv_scale = ph * 0.40;
+        wy = pad_y + ph * 0.48;
+        j = 0; loop(WV_RES,
+          wx = pad_x + 4 + ((j / WV_RES) * (pw - 8));
+          amp = abs(ptr[j]) * _wv_scale;
+          gfx_line(wx, wy - amp, wx, wy + amp);
+          j += 1;
+        );
+      );
+    );
+
+    // Flash overlay (velocity hit — white flash like real rubber pad press)
+    pad_flash[gi] > 0 ? (
+      _flash_a = pad_flash[gi] / 8.0;
+      gfx_set(1, 1, 1, _flash_a * 0.35);
+      gfx_rect(pad_x + 2, pad_y + 2, pw - 4, ph - 4);
+      // Colored glow ring around pad edge on hit
+      has_sample ? (
+        gfx_set(pr, pgg, pb, _flash_a * 0.6);
+        gfx_roundrect(pad_x - 1, pad_y - 1, pw + 2, ph + 2, _rd);
+        gfx_roundrect(pad_x - 2, pad_y - 2, pw + 4, ph + 4, _rd + 1);
+      );
+      pad_flash[gi] -= 1;
+    );
+
+    // ── Per-pad repeat indicator (bottom-center, color-coded by div type) ──
+    // Straight (1,4,7,10,13)  → green
+    // Triplet  (2,5,8,11,14)  → amber
+    // Dotted   (3,6,9,12,15)  → purple
+    p_rpt_div[gi] > 0 ? (
+      get_rpt_div_name(p_rpt_div[gi]);
+      gfx_setfont(1, "Arial", 10, 'b');
+      gfx_measurestr(#_rpt_name, tw, th);
+      _rpt_ix = pad_x + ((pw - tw) / 2)|0;
+      _rpt_iy = pad_y + ph - th - 4;
+      _rpt_type = (p_rpt_div[gi] - 1) % 3;
+      // Dark background pill
+      gfx_set(0, 0, 0, 0.70);
+      gfx_rect(_rpt_ix - 3, _rpt_iy - 2, tw + 6, th + 4);
+      // Color-coded text per div type
+      _rpt_type == 0 ? gfx_set(0.30, 0.85, 0.55, 1.0) :
+      _rpt_type == 1 ? gfx_set(0.95, 0.65, 0.20, 1.0) :
+                       gfx_set(0.70, 0.55, 0.95, 1.0);
+      gfx_x = _rpt_ix; gfx_y = _rpt_iy; gfx_drawstr(#_rpt_name);
+    );
+
+    // ── Level meters (stereo L+R vertical bars, left edge) ──────────
+    mtr_w = 2; mtr_gap = 1;
+    mtr_h_max = ph - 4;
+    // Left channel
+    _mL = min(1.0, pad_meterL[gi]);
+    _mL_fill = (_mL * mtr_h_max)|0;
+    // Right channel
+    _mR = min(1.0, pad_meterR[gi]);
+    _mR_fill = (_mR * mtr_h_max)|0;
+    // Dark track background
+    gfx_set(0, 0, 0, 0.25);
+    gfx_rect(pad_x + 1, pad_y + 2, mtr_w * 2 + mtr_gap, mtr_h_max);
+    // L bar
+    _mL_fill > 0 ? (
+      _mL < 0.7 ? gfx_set(0.2, 0.85, 0.3, 0.80) :
+      _mL < 0.9 ? gfx_set(0.85, 0.85, 0.2, 0.80) :
+                   gfx_set(0.85, 0.2, 0.2, 0.80);
+      gfx_rect(pad_x + 1, pad_y + 2 + mtr_h_max - _mL_fill, mtr_w, _mL_fill);
+    );
+    // R bar
+    _mR_fill > 0 ? (
+      _mR < 0.7 ? gfx_set(0.2, 0.85, 0.3, 0.80) :
+      _mR < 0.9 ? gfx_set(0.85, 0.85, 0.2, 0.80) :
+                   gfx_set(0.85, 0.2, 0.2, 0.80);
+      gfx_rect(pad_x + 1 + mtr_w + mtr_gap, pad_y + 2 + mtr_h_max - _mR_fill, mtr_w, _mR_fill);
+    );
+    // Clip indicator (red dot at top when peaking)
+    max(_mL, _mR) > 0.95 ? (
+      gfx_set(1, 0.15, 0.1, 0.9);
+      gfx_rect(pad_x + 1, pad_y + 1, mtr_w * 2 + mtr_gap, 2);
+    );
+
+    // ── Note name (top-left, clickable dropdown) ──────────────────────
+    _nn = p_note[gi];
+    _oct = (_nn / 12)|0 - 1;
+    _semi = _nn % 12;
+    _semi == 0  ? strcpy(#_note, "C")  :
+    _semi == 1  ? strcpy(#_note, "C#") :
+    _semi == 2  ? strcpy(#_note, "D")  :
+    _semi == 3  ? strcpy(#_note, "D#") :
+    _semi == 4  ? strcpy(#_note, "E")  :
+    _semi == 5  ? strcpy(#_note, "F")  :
+    _semi == 6  ? strcpy(#_note, "F#") :
+    _semi == 7  ? strcpy(#_note, "G")  :
+    _semi == 8  ? strcpy(#_note, "G#") :
+    _semi == 9  ? strcpy(#_note, "A")  :
+    _semi == 10 ? strcpy(#_note, "A#") :
+                  strcpy(#_note, "B");
+    // ── Pad number (top-left corner) ───────────────────────────────
+    // Small unobtrusive 1-based pad number for visual reference and
+    // future use (per-pad indicators, menu hints, etc.). Drawn in a
+    // smaller faded font so it doesn't compete with the MIDI note
+    // label, which now shifts right to make room.
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_set(1, 1, 1, is_muted ? 0.20 : 0.45);
+    sprintf(#_padnum_str, "%d", gi + 1);
+    gfx_measurestr(#_padnum_str, _padnum_tw, _padnum_th);
+    gfx_x = pad_x + 3; gfx_y = pad_y + 3; gfx_drawstr(#_padnum_str);
+
+    // ── Pad number (bottom-left corner) ────────────────────────────
+    // Reserved as the canonical pad ID for future REAPER-side database
+    // matching. Sits past the level meter (~5px wide) at the left edge.
+    gfx_setfont(1, "Arial", 11, 'b');
+    gfx_set(1, 1, 1, is_muted ? 0.45 : 0.80);
+    gfx_measurestr(#_padnum_str, _bl_pn_tw, _bl_pn_th);
+    gfx_x = pad_x + 8; gfx_y = pad_y + ph - _bl_pn_th - 2;
+    gfx_drawstr(#_padnum_str);
+
+    // ── MIDI note label (top-left, after pad number) ───────────────
+    sprintf(#_nn_str, "%s%d", #_note, _oct);
+    gfx_setfont(1, "Arial", 12, 'b');
+    // Brighter when note is user-locked
+    gfx_set(1, 1, 1, is_muted ? 0.25 : (p_note_lock[gi] ? 0.85 : 0.70));
+    _nn_x = pad_x + 3 + _padnum_tw + 4;  // 4 px gap after pad number
+    gfx_x = _nn_x; gfx_y = pad_y + 2; gfx_drawstr(#_nn_str);
+    gfx_measurestr(#_nn_str, _nn_tw, _nn_th);
+    _nn_lx = _nn_x; _nn_ly = pad_y + 2;
+
+    // ── Pad name/number (top-right, clickable) ──────────────────────
+    _cn = get_cname_slot(gi);
+    strlen(_cn) > 0 ? (
+      // Custom name
+      gfx_set(1, 1, 1, is_muted ? 0.30 : 0.80);
+      gfx_setfont(1, "Arial", 11, 'b');
+      gfx_measurestr(_cn, tw, th);
+      tw > pw * 0.45 ? (
+        strcpy(#_tcn, _cn);
+        while(tw > pw * 0.45 && strlen(#_tcn) > 1) (
+          str_setlen(#_tcn, strlen(#_tcn) - 1);
+          gfx_measurestr(#_tcn, tw, th);
+        );
+        strcat(#_tcn, "..");
+        gfx_measurestr(#_tcn, tw, th);
+        gfx_x = pad_x + pw - tw - 2; gfx_y = pad_y + 2; gfx_drawstr(#_tcn);
+      ) : (
+        gfx_x = pad_x + pw - tw - 2; gfx_y = pad_y + 2; gfx_drawstr(_cn);
+      );
+    ) : (
+      // Default: pad number
+      gfx_set(1, 1, 1, is_muted ? 0.22 : 0.55);
+      gfx_setfont(1, "Arial", 11, 'b');
+      sprintf(#_pn, "%d", gi + 1);
+      gfx_measurestr(#_pn, tw, th);
+      gfx_x = pad_x + pw - tw - 2; gfx_y = pad_y + 2; gfx_drawstr(#_pn);
+    );
+    _name_lx = pad_x + pw - tw - 4; _name_ly = pad_y + 1;
+    _name_bw = tw + 4; _name_bh = th + 2;
+    // Subtle border box to indicate clickable area
+    gfx_set(1, 1, 1, is_muted ? 0.08 : 0.18);
+    gfx_rect(_name_lx, _name_ly, _name_bw, _name_bh, 0);
+
+    // ── Empty pad "DROP" hint (bottom-left) ─────────────────────────────
+    !has_sample ? (
+      gfx_setfont(1, "Arial", 11, 'b');
+      gfx_set(0.60, 0.58, 0.56, 0.50);
+      gfx_measurestr("DROP", tw, th);
+      gfx_x = pad_x + (pw - tw) / 2; gfx_y = pad_y + ph - th - 2;
+      gfx_drawstr("DROP");
+    );
+
+    // ── Output bus selector (bottom-right, clickable) ──────────────────
+    gfx_setfont(1, "Arial", 8, 'b');
+    sprintf(#_out, "Out %d", p_output[gi] + 1);
+    gfx_measurestr(#_out, _out_tw, _out_th);
+    _out_lx = pad_x + pw - _out_tw - 6;
+    _out_ly = pad_y + ph - _out_th - 4;
+    // Dark pill background for readability
+    gfx_set(0, 0, 0, is_muted ? 0.35 : 0.55);
+    gfx_rect(_out_lx - 2, _out_ly - 1, _out_tw + 4, _out_th + 2);
+    // Text
+    hsl_to_rgb(p_output[gi] / 16.0, 0.75, 0.72);
+    gfx_set(_hsl_r, _hsl_g, _hsl_b, is_muted ? 0.50 : 1.0);
+    gfx_x = _out_lx; gfx_y = _out_ly; gfx_drawstr(#_out);
+
+    // ── Control strip below pad: [S] [M] [RPT] ──VOL── ──PAN── ───────────
+    _ctrl_y = cy + ph + 4;
+    _ctrl_h = btn_h;
+    _pill_w = (pw / 6)|0; _pill_h = _ctrl_h;
+    _knob_active = 0;
+    _pill_r = 2;  // corner radius for pills
+
+    // SOLO pill (left side)
+    _pill_s_x = cx + 2;
+    p_solo[gi] ? (
+      gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.90);
+      gfx_rect(_pill_s_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(1, 1, 1, 0.95);
+    ) : (
+      gfx_set(0.42, 0.40, 0.38, 1);
+      gfx_rect(_pill_s_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(0.78, 0.76, 0.73, 1);
+    );
+    gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+    gfx_rect(_pill_s_x, _ctrl_y, _pill_r, 1); gfx_rect(_pill_s_x, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_s_x + _pill_w - _pill_r, _ctrl_y, _pill_r, 1); gfx_rect(_pill_s_x + _pill_w - 1, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_s_x, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_s_x, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_rect(_pill_s_x + _pill_w - _pill_r, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_s_x + _pill_w - 1, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_measurestr("S", tw, th);
+    gfx_x = _pill_s_x + (_pill_w - tw) / 2; gfx_y = _ctrl_y + (_pill_h - th) / 2;
+    gfx_drawstr("S");
+    gfx_set(1, 1, 1, 0.15); gfx_rect(_pill_s_x + _pill_r, _ctrl_y, _pill_w - _pill_r * 2, 1);
+    gfx_set(0, 0, 0, 0.20); gfx_rect(_pill_s_x + _pill_r, _ctrl_y + _pill_h - 1, _pill_w - _pill_r * 2, 1);
+
+    // MUTE pill (next to solo)
+    _pill_m_x = _pill_s_x + _pill_w + 1;
+    p_mute[gi] ? (
+      gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.90);
+      gfx_rect(_pill_m_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(1, 1, 1, 0.95);
+    ) : (
+      gfx_set(0.42, 0.40, 0.38, 1);
+      gfx_rect(_pill_m_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(0.78, 0.76, 0.73, 1);
+    );
+    gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+    gfx_rect(_pill_m_x, _ctrl_y, _pill_r, 1); gfx_rect(_pill_m_x, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_m_x + _pill_w - _pill_r, _ctrl_y, _pill_r, 1); gfx_rect(_pill_m_x + _pill_w - 1, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_m_x, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_m_x, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_rect(_pill_m_x + _pill_w - _pill_r, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_m_x + _pill_w - 1, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_measurestr("M", tw, th);
+    gfx_x = _pill_m_x + (_pill_w - tw) / 2; gfx_y = _ctrl_y + (_pill_h - th) / 2;
+    gfx_drawstr("M");
+    gfx_set(1, 1, 1, 0.15); gfx_rect(_pill_m_x + _pill_r, _ctrl_y, _pill_w - _pill_r * 2, 1);
+    gfx_set(0, 0, 0, 0.20); gfx_rect(_pill_m_x + _pill_r, _ctrl_y + _pill_h - 1, _pill_w - _pill_r * 2, 1);
+
+    // RPT pill (per-pad note repeat)
+    _pill_rpt_x = _pill_m_x + _pill_w + 1;
+    p_rpt_div[gi] > 0 ? (
+      gfx_set(0.10, 0.85, 0.45, 1);
+      gfx_rect(_pill_rpt_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(0, 0, 0, 0.95);
+    ) : (
+      gfx_set(0.42, 0.40, 0.38, 1);
+      gfx_rect(_pill_rpt_x, _ctrl_y, _pill_w, _pill_h);
+      gfx_set(0.78, 0.76, 0.73, 1);
+    );
+    gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+    gfx_rect(_pill_rpt_x, _ctrl_y, _pill_r, 1); gfx_rect(_pill_rpt_x, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_rpt_x + _pill_w - _pill_r, _ctrl_y, _pill_r, 1); gfx_rect(_pill_rpt_x + _pill_w - 1, _ctrl_y, 1, _pill_r);
+    gfx_rect(_pill_rpt_x, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_rpt_x, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_rect(_pill_rpt_x + _pill_w - _pill_r, _ctrl_y + _pill_h - 1, _pill_r, 1); gfx_rect(_pill_rpt_x + _pill_w - 1, _ctrl_y + _pill_h - _pill_r, 1, _pill_r);
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_measurestr("R", tw, th);
+    gfx_x = _pill_rpt_x + (_pill_w - tw) / 2; gfx_y = _ctrl_y + (_pill_h - th) / 2;
+    gfx_drawstr("R");
+    gfx_set(1, 1, 1, 0.15); gfx_rect(_pill_rpt_x + _pill_r, _ctrl_y, _pill_w - _pill_r * 2, 1);
+    gfx_set(0, 0, 0, 0.20); gfx_rect(_pill_rpt_x + _pill_r, _ctrl_y + _pill_h - 1, _pill_w - _pill_r * 2, 1);
+
+    // Separator line between S/M/RPT and V/P
+    _knob_area_x = _pill_rpt_x + _pill_w + 3;
+    gfx_set(0.55, 0.53, 0.50, 0.25);
+    gfx_rect(_knob_area_x - 2, _ctrl_y + 2, 1, _pill_h - 4);
+
+    // VOL mini-knob (right of S/M/RPT pills). Radius scales with the
+    // control-row height so the knobs grow with the pad rather than
+    // staying frozen at 7px on a stretched window. Floor at 6px (still
+    // clickable on small windows), ceiling at 12px (mini-knob shouldn't
+    // crowd the label below it).
+    _mini_kr = max(6, min(12, (_ctrl_h / 3)|0));
+    _knob_area_w = cx + pw - _knob_area_x;
+    _vol_cx = _knob_area_x + (_knob_area_w / 4)|0;
+    _pan_cx = _knob_area_x + ((_knob_area_w * 3) / 4)|0;
+    _knob_cy = _ctrl_y + (_ctrl_h / 2)|0;
+
+    _km_v = km_pad_vol_pan + (gi * KM_PAD_MINI + 0) * KS;
+    has_sample ? (
+      mpc_knob_draw(_vol_cx, _knob_cy, _mini_kr, p_gain[gi], 0, 2.0, 0, _km_v[0],
+                    0.85, 0.70, 0.20, 0.36, 0.34, 0.32);
+      // Bigger, brighter, fully opaque label so VOL/PAN read clearly
+      // against the dark control-strip area at the bottom of the pad.
+      // Was: Arial 9 'b', (0.78, 0.76, 0.73, 0.85) — washed out.
+      gfx_setfont(1, "Arial", 9, 'b'); gfx_set(0.96, 0.94, 0.91, 1.0);
+      gfx_measurestr("VOL", tw, th);
+      gfx_x = _vol_cx - tw/2; gfx_y = _knob_cy + _mini_kr + 1; gfx_drawstr("VOL");
+    );
+    // VOL/PAN knob interaction — only when no overlay is open (prevents click-through)
+    overlay_pad < 0 ? (
+      nv = mpc_knob_interact(_km_v, _vol_cx, _knob_cy, _mini_kr, p_gain[gi], 0, 2.0, 1.0, 0);
+      nv != p_gain[gi] ? (p_gain[gi] = nv; s_dirty[gi] = 1; mark_dirty_pad(gi););
+      _km_v[1] ? _knob_active = 1;
+    );
+
+    // PAN mini-knob
+    _km_p = km_pad_vol_pan + (gi * KM_PAD_MINI + 1) * KS;
+    has_sample ? (
+      mpc_knob_draw(_pan_cx, _knob_cy, _mini_kr, p_pan[gi], -1.0, 1.0, 1, _km_p[0],
+                    0.70, 0.85, 0.30, 0.36, 0.34, 0.32);
+      // Match the brighter VOL label above for legibility on the pad strip.
+      gfx_setfont(1, "Arial", 9, 'b'); gfx_set(0.96, 0.94, 0.91, 1.0);
+      gfx_measurestr("PAN", tw, th);
+      gfx_x = _pan_cx - tw/2; gfx_y = _knob_cy + _mini_kr + 1; gfx_drawstr("PAN");
+    );
+    overlay_pad < 0 ? (
+      nv = mpc_knob_interact(_km_p, _pan_cx, _knob_cy, _mini_kr, p_pan[gi], -1.0, 1.0, 0, 0);
+      nv != p_pan[gi] ? (p_pan[gi] = nv; p_panL[gi] = 1.0 - max(0.0, nv); p_panR[gi] = 1.0 + min(0.0, nv); mark_dirty_pad(gi););
+      _km_p[1] ? _knob_active = 1;
+    );
+
+    // Knob hover flag
+    _knob_hover = _knob_active || dist(mx, my, _vol_cx, _knob_cy) <= _mini_kr + 3 || dist(mx, my, _pan_cx, _knob_cy) <= _mini_kr + 3;
+
+    // ── Pad hit-testing (left=trigger, right=overlay) ──────────────
+    in_s   = mx >= _pill_s_x && mx <= _pill_s_x + _pill_w && my >= _ctrl_y && my <= _ctrl_y + _pill_h;
+    in_m   = mx >= _pill_m_x && mx <= _pill_m_x + _pill_w && my >= _ctrl_y && my <= _ctrl_y + _pill_h;
+    in_rpt = mx >= _pill_rpt_x && mx <= _pill_rpt_x + _pill_w && my >= _ctrl_y && my <= _ctrl_y + _pill_h;
+    // Per-pad tooltips. Base zone 100 + 16 pads each = unique zone per
+    // pad + per control (so moving from pad 5's S to pad 6's S resets
+    // the hover timer correctly).
+    in_s   ? swing_tooltip_check(200 + gi, "Solo this pad — mutes all other pads while held.");
+    in_m   ? swing_tooltip_check(300 + gi, "Mute this pad — no audio output regardless of triggers.");
+    in_rpt ? swing_tooltip_check(400 + gi, "Per-pad repeat division override. Left-click cycles; right-click for full menu. OFF = use global RPT setting.");
+    dist(mx, my, _vol_cx, _knob_cy) <= _mini_kr + 3 ?
+      swing_tooltip_check(500 + gi, "Pad volume — drag for fine, scroll wheel for coarse, double-click resets to 0 dB.");
+    dist(mx, my, _pan_cx, _knob_cy) <= _mini_kr + 3 ?
+      swing_tooltip_check(600 + gi, "Pad pan (-100% L to +100% R) — drag, scroll, or double-click to center.");
+    overlay_pad != gi ? (  // don't process pad clicks when overlay is open for it
+      in_pad = mx >= pad_x && mx <= pad_x+pw && my >= pad_y && my <= pad_y+ph;
+      // Pad face hover tooltip (only when not over a sub-control).
+      in_pad && !in_s && !in_m && !in_rpt && !_knob_hover ?
+        swing_tooltip_check(100 + gi, "Drag samples here to load. Left-click triggers; Shift+drag swaps pads; Ctrl+click clears. Right-click opens the per-pad envelope/FX overlay.");
+
+      // Output bus dropdown (check before pad trigger)
+      _out_clicked = 0;
+      in_out = mx >= _out_lx && mx <= _out_lx + _out_tw + 2 && my >= _out_ly && my <= _out_ly + _out_th + 2;
+      in_out && lmb_down && overlay_pad < 0 ? (
+        resp = gfx_showmenu("Out 1|Out 2|Out 3|Out 4|Out 5|Out 6|Out 7|Out 8|Out 9|Out 10|Out 11|Out 12|Out 13|Out 14|Out 15|Out 16");
+        resp > 0 ? ( p_output[gi] = resp - 1; mark_dirty_pad(gi); );
+        _out_clicked = 1;
+      );
+
+      // Note name dropdown (top-left)
+      _note_clicked = 0;
+      mx >= _nn_lx && mx <= _nn_lx + _nn_tw + 4 && my >= _nn_ly && my <= _nn_ly + _nn_th + 2 && lmb_down && overlay_pad < 0 ? (
+        _note_clicked = 1;
+        resp = gfx_showmenu(#note_menu);
+        resp > 0 ? (
+          // Flat list: resp 1 = MIDI 0, resp 128 = MIDI 127
+          _midi = resp - 1;
+          _midi >= 0 && _midi <= 127 ? (
+            p_note[gi] = _midi;
+            p_note_lock[gi] = 1;
+            mark_dirty_pad(gi);
+          );
+        );
+      );
+
+      // Pad name (top-right) — click to rename via REAPER dialog
+      _name_clicked = 0;
+      _name_hit = mx >= _name_lx && mx <= _name_lx + _name_bw && my >= _name_ly && my <= _name_ly + _name_bh && overlay_pad < 0;
+      _name_hit && lmb_down ? (
+        _name_clicked = 1;
+        gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 &&
+        (gmem[KIT_GMEM_LOCK] == 0 || gmem[KIT_GMEM_LOCK] == instance_id) ? (
+          gmem[KIT_GMEM_LOCK] = instance_id;  // acquire instance lock
+          // Write current pad name chars to gmem so Lua can pre-fill the dialog
+          _cn = get_cname_slot(gi);
+          _cnl = strlen(_cn);
+          _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+            gmem[KIT_GMEM_PADNAMES + gi * KIT_GMEM_PADNAME_LEN + _cj] =
+              _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+            _cj += 1;
+          );
+          gmem[KIT_GMEM_PARAM1] = gi;  // pad index for CMD 50 dialog
+          gmem[KIT_GMEM_CMD] = 50;     // CMD 50 = rename pad
+        );
+      );
+
+      // Shift+left-click pad → start drag-swap
+      in_pad && lmb_down && SHIFT && overlay_pad < 0 && !_knob_hover ? (
+        drag_src_pad = gi; drag_active = 0;
+        drag_start_x = mx; drag_start_y = my;
+      );
+
+      // Left-click pad → select + trigger
+      in_pad && lmb_down && !SHIFT && overlay_pad < 0 && !_out_clicked && !_note_clicked && !_name_clicked && !_knob_hover ? (
+        sel_pad = gi;
+        lcd_right_tab = 1;  // auto-switch to PAD tab
+        pad_has_audio(gi) ? (
+          launch_voices_for_pad(gi, 127, 8);
+          p_held[gi] = 1; p_held_vel[gi] = 127; gui_held_pad = gi;
+        );
+        // Pad-click-selects-track (opt-in via Colors right-click menu):
+        // signal the bridge to select the corresponding multi-out child
+        // track in REAPER's TCP/MCP. 1-indexed (0 = no request, bridge
+        // writes 0 back after consuming). Gated on bridge alive so the
+        // request doesn't stale-trigger when the bridge later starts.
+        pad_click_selects_track && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+          gmem[GS_PAD_TRACK_SELECT] = gi + 1;
+        );
+      );
+
+      // Ctrl+click pad → clear pad (deferred for undo)
+      in_pad && lmb_down && CTRL && overlay_pad < 0 && pad_has_audio(gi) ? (
+        gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+          gmem[KIT_GMEM_UNDO_DESC] = 2; gmem[KIT_GMEM_CMD] = 46;
+          _undo_pending = 2; _undo_pad = gi;
+        ) : (
+          clear_pad(gi);
+        );
+      );
+
+      // Right-click pad → open overlay
+      in_pad && rmb_down && overlay_pad < 0 ? (
+        overlay_pad = gi;
+        overlay_layer = 0;  // always start on L1
+        wf_zoom = 1.0; wf_scroll = 0.0;  // reset zoom on new pad
+      );
+
+      // Drag-to-load on pad grid (only when overlay is closed)
+      // Multi-file drop fills consecutive pads with legacy single-sample.
+      // .sfz files route through the Lua bridge import pipeline instead of
+      // being loaded as raw audio.
+      in_pad && overlay_pad < 0 && gfx_getdropfile(0, #df) ? (
+        _is_kit_import_ext(#df) && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+          _send_kit_import_to_bridge(#df);
+        ) : (
+          // Tukan-style undo — see main grid drag at line ~190 for the
+          // rationale. Audio is in @serialize, mark_dirty()
+          // triggers REAPER's automatic chunk diff. No CMD 46/48.
+          drop_gi = gi;
+          drop_idx = 0;
+          while(gfx_getdropfile(drop_idx, #df) && drop_gi < NUM_PADS) (
+            p_gain[drop_gi] = 1.0; p_pan[drop_gi] = 0; p_tune[drop_gi] = 0;
+            p_panL[drop_gi] = 1.0; p_panR[drop_gi] = 1.0;
+            s_start[drop_gi] = 0; s_end[drop_gi] = 1.0;
+            load_from_path(drop_gi, #df);
+            recalc_pad(drop_gi);
+            s_dirty[drop_gi] = 1;
+            drop_gi += 1;
+            drop_idx += 1;
+          );
+          mark_dirty_pad(gi);
+          sync_note_names();
+          col_dirty = 1; // re-derive auto-color from dropped samples
+        );
+        gfx_getdropfile(-1);
+      );
+
+    );
+    // M button click — blocked when any overlay is open (prevents click-through)
+    in_m && lmb_down && overlay_pad < 0 ? (
+      p_mute[gi] = !p_mute[gi];
+      mark_dirty_pad(gi);
+    );
+    // S button click — blocked when any overlay is open (prevents click-through)
+    in_s && lmb_down && overlay_pad < 0 ? (
+      p_solo[gi] = !p_solo[gi];
+      mark_dirty_pad(gi);
+    );
+    // RPT button: right-click = menu, scroll = cycle, blocked when overlay open
+    in_rpt && rmb_down && overlay_pad < 0 ? (
+      resp = gfx_showmenu("OFF|1/4|1/4 T|1/4 D||1/8|1/8 T|1/8 D||1/16|1/16 T|1/16 D||1/32|1/32 T|1/32 D||1/64|1/64 T|1/64 D");
+      resp > 0 ? (
+        p_rpt_div[gi] = resp - 1;
+        p_rpt_ctr[gi] = 0; p_rpt_swph[gi] = 0;
+        mark_dirty_pad(gi);
+      );
+    );
+    in_rpt && frame_wheel != 0 && overlay_pad < 0 ? (
+      p_rpt_div[gi] = p_rpt_div[gi] + sign_of(frame_wheel);
+      p_rpt_div[gi] < 0 ? p_rpt_div[gi] = RPT_NUM_DIVS;
+      p_rpt_div[gi] > RPT_NUM_DIVS ? p_rpt_div[gi] = 0;
+      p_rpt_ctr[gi] = 0; p_rpt_swph[gi] = 0;
+      mark_dirty_pad(gi);
+    );
+    gcol += 1;
+  );  // end col loop
+  grow += 1;
+  );  // end row loop
+
+  // ── Drag-swap logic (Shift+drag between pads) ─────────────────────────
+  drag_src_pad >= 0 ? (
+    LMB ? (
+      // Mouse still held — check if moved enough to activate visual drag
+      abs(mx - drag_start_x) + abs(my - drag_start_y) > 6 ? drag_active = 1;
+
+      drag_active ? (
+        // Draw ghost pad at cursor
+        _cb = drag_src_pad * 3;
+        gfx_set(col_rgba[_cb], col_rgba[_cb+1], col_rgba[_cb+2], 0.5);
+        gfx_rect(mx - 15, my - 15, 30, 30);
+        gfx_set(1, 1, 1, 0.7);
+        gfx_roundrect(mx - 15, my - 15, 30, 30, 3);
+
+        // Highlight target pad under cursor
+        _drop_tgt = -1;
+        _drow = 0;
+        loop(4,
+          _dcol = 0;
+          loop(4,
+            _di = (3 - _drow) * 4 + _dcol;
+            _dx = grid_x + _dcol * cell_w + 3;
+            _dy = grid_y + _drow * cell_h + 3;
+            _dpw = cell_w - 4;
+            _dph = pad_h;
+            mx >= _dx && mx <= _dx + _dpw && my >= _dy && my <= _dy + _dph && _di != drag_src_pad ? (
+              _drop_tgt = _di;
+              gfx_set(1, 1, 1, 0.25);
+              gfx_rect(_dx, _dy, _dpw, _dph);
+            );
+            _dcol += 1;
+          );
+          _drow += 1;
+        );
+      );
+    ) : (
+      // Mouse released — perform swap if we have a valid target
+      drag_active && drag_src_pad >= 0 ? (
+        // Find which pad the cursor is over
+        _drop_tgt = -1;
+        _drow = 0;
+        loop(4,
+          _dcol = 0;
+          loop(4,
+            _di = (3 - _drow) * 4 + _dcol;
+            _dx = grid_x + _dcol * cell_w + 3;
+            _dy = grid_y + _drow * cell_h + 3;
+            _dpw = cell_w - 4;
+            _dph = pad_h;
+            mx >= _dx && mx <= _dx + _dpw && my >= _dy && my <= _dy + _dph ? (
+              _drop_tgt = _di;
+            );
+            _dcol += 1;
+          );
+          _drow += 1;
+        );
+        _drop_tgt >= 0 && _drop_tgt != drag_src_pad ? (
+          gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+            gmem[KIT_GMEM_UNDO_DESC] = 5; gmem[KIT_GMEM_CMD] = 46;
+            _undo_pending = 5; _undo_pad = drag_src_pad; _undo_pad2 = _drop_tgt;
+          ) : (
+            swap_pads(drag_src_pad, _drop_tgt);
+            strcpy(#_swap_nm, get_cname_slot(drag_src_pad));
+            strcpy(get_cname_slot(drag_src_pad), get_cname_slot(_drop_tgt));
+            strcpy(get_cname_slot(_drop_tgt), #_swap_nm);
+            strcpy(#_swap_nm, get_name_slot(drag_src_pad));
+            strcpy(get_name_slot(drag_src_pad), get_name_slot(_drop_tgt));
+            strcpy(get_name_slot(_drop_tgt), #_swap_nm);
+            strcpy(#_swap_nm, get_path_slot(drag_src_pad));
+            strcpy(get_path_slot(drag_src_pad), get_path_slot(_drop_tgt));
+            strcpy(get_path_slot(_drop_tgt), #_swap_nm);
+            _swli = 0; loop(MAX_LAYERS,
+              _sw_a = LPATH_STR_BASE + drag_src_pad * MAX_LAYERS + _swli;
+              _sw_b = LPATH_STR_BASE + _drop_tgt * MAX_LAYERS + _swli;
+              strcpy(#_swap_nm, _sw_a); strcpy(_sw_a, _sw_b); strcpy(_sw_b, #_swap_nm);
+              _swli += 1;
+            );
+            mark_dirty();
+          );
+        );
+      );
+      drag_src_pad = -1; drag_active = 0;
+    );
+  );
+);
+

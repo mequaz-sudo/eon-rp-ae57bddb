@@ -1,0 +1,420 @@
+// rk_reverb.jsfx-inc — Hadamard FDN stereo reverb for DrumKit_ReaKit
+// (c) EON Studios — All Rights Reserved
+//
+// DSP derived from Red Lexikan S2 Hadamard FDN topology.
+// 4-path FDN with Hadamard mixing matrix, 4× series allpass input diffusion,
+// one-pole LP damping in feedback, triangle-LFO modulated delay reads,
+// multi-tap output, pre-delay, and output HPF.
+//
+// Call rvb_init(mem_start) from @init, rvb_recalc() when params change,
+// rvb_tick() once per @block (updates LFO), rvb_process(inL, inR) from @sample.
+// Returns via rvb_outL / rvb_outR.
+//
+// Global parameters (set from GUI before calling rvb_recalc):
+//   rvb_size     — room size (0–1): scales feedback + delay times
+//   rvb_damp     — damping (0–1): higher = darker tail
+//   rvb_mix      — wet/dry mix for return (0–1, applied by host/GUI externally)
+//   rvb_width    — stereo width (0–1)
+//   rvb_predelay — pre-delay in ms (0–250)
+//   rvb_hpf      — output HPF frequency in Hz (0 = off, 20–500 useful for drums)
+
+@init
+
+// ─── Init ──────────────────────────────────────────────────────────────────
+
+function rvb_init(mem_start)
+local(i, sc)
+(
+  sc = srate / 44100;
+
+  // ── FDN base delay lengths (samples at srate) ──
+  // Mutually prime ratios chosen for maximum density / minimal flutter.
+  // These are the LATE reverb tank delays. Tuned for a natural room sound.
+  // Lengths: ~29ms, ~37ms, ~41ms, ~47ms at 44100 (prime-ish ratios)
+  RVB_BASE_D1 = (1277 * sc) | 0;   // 29.0ms
+  RVB_BASE_D2 = (1637 * sc) | 0;   // 37.1ms
+  RVB_BASE_D3 = (1823 * sc) | 0;   // 41.3ms
+  RVB_BASE_D4 = (2089 * sc) | 0;   // 47.4ms
+
+  // Stereo offset — different for each path to maximize decorrelation
+  RVB_ST_OFS1 = (23 * sc) | 0;
+  RVB_ST_OFS2 = (37 * sc) | 0;
+  RVB_ST_OFS3 = (51 * sc) | 0;
+  RVB_ST_OFS4 = (67 * sc) | 0;
+
+  // Maximum delay length (for size=1 + modulation headroom + stereo offset)
+  RVB_MAX_DL = ((2300 * sc) | 0) + 8;
+
+  // Allocate 8 delay buffers (L: 0-3, R: 4-7)
+  rvb_dl_buf = mem_start; mem_start += 8;
+  rvb_dl_wp  = mem_start; mem_start += 8;
+  i = 0; loop(8,
+    rvb_dl_buf[i] = mem_start;
+    memset(mem_start, 0, RVB_MAX_DL);
+    mem_start += RVB_MAX_DL;
+    rvb_dl_wp[i] = 0;
+    i += 1;
+  );
+
+  // FDN delay lengths array (8 entries, filled by rvb_recalc)
+  rvb_dl_len = mem_start; mem_start += 8;
+  memset(rvb_dl_len, 0, 8);
+
+  // One-pole LP filter state per delay path (8 total)
+  rvb_lp_state = mem_start; mem_start += 8;
+  memset(rvb_lp_state, 0, 8);
+
+  // ── Input diffusion allpasses (4 series, stereo = 8 buffers) ──
+  // Lengths: ~5ms, ~7ms, ~3ms, ~1.7ms (prime-ish, descending for smear)
+  RVB_AP1_LEN = max(4, (227 * sc) | 0);   // 5.1ms
+  RVB_AP2_LEN = max(4, (311 * sc) | 0);   // 7.1ms
+  RVB_AP3_LEN = max(4, (149 * sc) | 0);   // 3.4ms
+  RVB_AP4_LEN = max(4, (79 * sc) | 0);    // 1.8ms
+  // R offsets for diffusion decorrelation
+  RVB_AP1R_LEN = max(4, (241 * sc) | 0);
+  RVB_AP2R_LEN = max(4, (337 * sc) | 0);
+  RVB_AP3R_LEN = max(4, (163 * sc) | 0);
+  RVB_AP4R_LEN = max(4, (89 * sc) | 0);
+
+  rvb_ap_buf = mem_start; mem_start += 8;  // pointers
+  rvb_ap_wp  = mem_start; mem_start += 8;  // write positions
+  rvb_ap_len = mem_start; mem_start += 8;  // lengths
+
+  rvb_ap_len[0] = RVB_AP1_LEN; rvb_ap_len[1] = RVB_AP2_LEN;
+  rvb_ap_len[2] = RVB_AP3_LEN; rvb_ap_len[3] = RVB_AP4_LEN;
+  rvb_ap_len[4] = RVB_AP1R_LEN; rvb_ap_len[5] = RVB_AP2R_LEN;
+  rvb_ap_len[6] = RVB_AP3R_LEN; rvb_ap_len[7] = RVB_AP4R_LEN;
+
+  i = 0; loop(8,
+    rvb_ap_buf[i] = mem_start;
+    memset(mem_start, 0, rvb_ap_len[i]);
+    mem_start += rvb_ap_len[i];
+    rvb_ap_wp[i] = 0;
+    i += 1;
+  );
+
+  // ── Pre-delay buffer (stereo, max 250ms) ──
+  RVB_MAX_PRE = ((0.26 * srate) | 0) + 2;
+  rvb_pre_bufL = mem_start; mem_start += RVB_MAX_PRE;
+  rvb_pre_bufR = mem_start; mem_start += RVB_MAX_PRE;
+  memset(rvb_pre_bufL, 0, RVB_MAX_PRE);
+  memset(rvb_pre_bufR, 0, RVB_MAX_PRE);
+  rvb_pre_wp = 0;
+
+  // ── Output HPF state (one-pole) ──
+  rvb_hpf_stateL = 0;
+  rvb_hpf_stateR = 0;
+
+  // ── LFO state (triangle, 4 phases) ──
+  rvb_lfo_ph1 = 0.00;
+  rvb_lfo_ph2 = 0.25;
+  rvb_lfo_ph3 = 0.50;
+  rvb_lfo_ph4 = 0.75;
+  rvb_lfo_mod1 = 0; rvb_lfo_mod2 = 0;
+  rvb_lfo_mod3 = 0; rvb_lfo_mod4 = 0;
+
+  // ── Denormal protection constant ──
+  // JSFX has no scientific notation; precompute via pow().
+  RVB_DENORM = pow(10, -18);
+
+  // ── Runtime state ──
+  rvb_outL = 0;
+  rvb_outR = 0;
+
+  mem_start;
+);
+
+// ─── Recalculate coefficients ──────────────────────────────────────────────
+
+function rvb_recalc()
+local(sz)
+(
+  sz = max(0, min(1, rvb_size));
+
+  // Feedback A (primary): 0.60 (tiny room) to 0.93 (huge hall)
+  // Capped at 0.93 (not 0.94) for stability margin: the asymmetric
+  // fbA/fbB trick makes the mixing matrix non-unitary, so we keep
+  // headroom to prevent energy creep toward instability at max size.
+  rvb_fbA = 0.60 + sz * 0.33;
+  // Feedback B (secondary): 85% of A — asymmetric decay creates natural envelope
+  // where some paths die faster, preventing the "even wash" that sounds artificial
+  rvb_fbB = rvb_fbA * 0.85;
+
+  // Input injection gain — scales inversely with feedback (Lexikan-style)
+  // At small rooms (fbA=0.60): in_gain ≈ 0.56 (punchy, short)
+  // At big halls (fbA=0.94): in_gain ≈ 0.08 (gentle, long tail)
+  // This prevents the "splashy" onset where the first hit overwhelms the tail.
+  rvb_in_gain = (1.0 - rvb_fbA) * 1.4;
+
+  // Delay time scaling: size stretches the FDN delays
+  // Range: 0.35× (tight) to 1.0× (full)
+  rvb_dl_scale = 0.35 + sz * 0.65;
+
+  // Actual FDN delay lengths stored as array (L: 0-3, R: 4-7)
+  // Array avoids nested ternaries in _rvb_dl_read_tap.
+  rvb_dl_len[0] = max(8, (RVB_BASE_D1 * rvb_dl_scale) | 0);
+  rvb_dl_len[1] = max(8, (RVB_BASE_D2 * rvb_dl_scale) | 0);
+  rvb_dl_len[2] = max(8, (RVB_BASE_D3 * rvb_dl_scale) | 0);
+  rvb_dl_len[3] = max(8, (RVB_BASE_D4 * rvb_dl_scale) | 0);
+  // R paths: different stereo offsets per path for rich decorrelation
+  rvb_dl_len[4] = max(8, ((RVB_BASE_D1 + RVB_ST_OFS1) * rvb_dl_scale) | 0);
+  rvb_dl_len[5] = max(8, ((RVB_BASE_D2 + RVB_ST_OFS2) * rvb_dl_scale) | 0);
+  rvb_dl_len[6] = max(8, ((RVB_BASE_D3 + RVB_ST_OFS3) * rvb_dl_scale) | 0);
+  rvb_dl_len[7] = max(8, ((RVB_BASE_D4 + RVB_ST_OFS4) * rvb_dl_scale) | 0);
+
+  // Damping: one-pole LP coefficient
+  // damp=0 → coeff=0 (bypass, bright), damp=1 → coeff=0.80 (heavy, dark)
+  rvb_damp_coeff = max(0, min(1, rvb_damp)) * 0.80;
+
+  // Pre-delay in samples
+  rvb_pre_samps = min(RVB_MAX_PRE - 2,
+    max(0, rvb_predelay * 0.001 * srate) | 0);
+
+  // Output HPF coefficient (one-pole, 6dB/oct)
+  // Implemented as: subtract LP(input) from input. rvb_hpf_alpha is the
+  // LP smoothing factor: α = 2πf / (2πf + srate). The HPF state update
+  // is: state += (in - state) * α; out = in - state.
+  // Gate at 20 Hz — sub-audio HPF values have no useful effect and the
+  // formula degrades at very low frequencies.
+  rvb_hpf >= 20 ? (
+    rvb_hpf_on = 1;
+    rvb_hpf_alpha = rvb_hpf * 2 * $pi / (rvb_hpf * 2 * $pi + srate);
+  ) : (
+    rvb_hpf_on = 0;
+    rvb_hpf_alpha = 0;
+  );
+
+  // Width
+  rvb_w1 = max(0, min(1, rvb_width)) * 0.5 + 0.5;
+  rvb_w2 = (1.0 - max(0, min(1, rvb_width))) * 0.5;
+
+  // LFO modulation depth (0.4% — thickens the tail, prevents metallic ringing)
+  rvb_lfo_depth = sz > 0.05 ? 0.004 : 0;
+);
+
+// ─── Block-rate LFO tick ───────────────────────────────────────────────────
+
+function rvb_tick()
+local(v1, v2, v3, v4, inc)
+(
+  inc = samplesblock / srate;
+  rvb_lfo_ph1 += 0.17 * inc;
+  rvb_lfo_ph2 += 0.23 * inc;
+  rvb_lfo_ph3 += 0.13 * inc;
+  rvb_lfo_ph4 += 0.31 * inc;
+  // Robust wrap: handles multi-wrap in case samplesblock spikes (offline render)
+  rvb_lfo_ph1 -= (rvb_lfo_ph1 | 0);
+  rvb_lfo_ph2 -= (rvb_lfo_ph2 | 0);
+  rvb_lfo_ph3 -= (rvb_lfo_ph3 | 0);
+  rvb_lfo_ph4 -= (rvb_lfo_ph4 | 0);
+
+  // Triangle LFO: phase 0..1 → -1..+1
+  v1 = 4 * rvb_lfo_ph1 - 1; v1 > 1 ? v1 = 2 - v1; v1 < -1 ? v1 = -2 - v1;
+  v2 = 4 * rvb_lfo_ph2 - 1; v2 > 1 ? v2 = 2 - v2; v2 < -1 ? v2 = -2 - v2;
+  v3 = 4 * rvb_lfo_ph3 - 1; v3 > 1 ? v3 = 2 - v3; v3 < -1 ? v3 = -2 - v3;
+  v4 = 4 * rvb_lfo_ph4 - 1; v4 > 1 ? v4 = 2 - v4; v4 < -1 ? v4 = -2 - v4;
+
+  // Modulated delay lengths for L paths (R paths use fixed lengths — asymmetry = wider)
+  rvb_lfo_mod1 = max(8, rvb_dl_len[0] * (1 + v1 * rvb_lfo_depth));
+  rvb_lfo_mod2 = max(8, rvb_dl_len[1] * (1 + v2 * rvb_lfo_depth * 0.8));
+  rvb_lfo_mod3 = max(8, rvb_dl_len[2] * (1 + v3 * rvb_lfo_depth * 0.6));
+  rvb_lfo_mod4 = max(8, rvb_dl_len[3] * (1 + v4 * rvb_lfo_depth * 0.7));
+);
+
+// ─── Inline delay helpers ──────────────────────────────────────────────────
+
+function _rvb_dl_write(idx, val)
+local(buf, wp)
+(
+  buf = rvb_dl_buf[idx];
+  wp = rvb_dl_wp[idx];
+  buf[wp] = val;
+  wp += 1; wp >= RVB_MAX_DL ? wp = 0;
+  rvb_dl_wp[idx] = wp;
+);
+
+function _rvb_dl_read(idx, delay_samps)
+local(buf, wp, rp, rp_int, rp_frac, s0, s1)
+(
+  buf = rvb_dl_buf[idx];
+  wp = rvb_dl_wp[idx];
+  // Clamp to valid range — prevents out-of-bounds if LFO modulation
+  // ever pushes delay_samps beyond the buffer.
+  delay_samps = min(RVB_MAX_DL - 2, max(1, delay_samps));
+  rp = wp - delay_samps;
+  rp < 0 ? rp += RVB_MAX_DL;
+  rp_int = rp | 0;
+  rp_frac = rp - rp_int;
+  s0 = buf[rp_int];
+  rp_int += 1; rp_int >= RVB_MAX_DL ? rp_int = 0;
+  s1 = buf[rp_int];
+  s0 + (s1 - s0) * rp_frac;
+);
+
+// Read from delay at a secondary tap position (for multi-tap output)
+function _rvb_dl_read_tap(idx, tap_frac)
+local(buf, wp, len, rp, rp_int, rp_frac, s0, s1)
+(
+  buf = rvb_dl_buf[idx];
+  wp = rvb_dl_wp[idx];
+  // tap_frac is fraction of current delay length (0.0–1.0)
+  // Read at a different point in the delay for richer output
+  len = max(1, rvb_dl_len[idx] * tap_frac);
+  rp = wp - len;
+  rp < 0 ? rp += RVB_MAX_DL;
+  rp_int = rp | 0;
+  rp_frac = rp - rp_int;
+  s0 = buf[rp_int];
+  rp_int += 1; rp_int >= RVB_MAX_DL ? rp_int = 0;
+  s1 = buf[rp_int];
+  s0 + (s1 - s0) * rp_frac;
+);
+
+// ─── Inline allpass helper ─────────────────────────────────────────────────
+// Schroeder allpass: output = -g*in + buf[read] + g*buf[read]
+// where g = allpass gain coefficient
+
+function _rvb_ap_process(idx, input, g)
+local(buf, wp, cl, rd_pos, buf_out, out)
+(
+  buf = rvb_ap_buf[idx];
+  wp = rvb_ap_wp[idx];
+  cl = rvb_ap_len[idx];
+  rd_pos = wp;  // circular read = oldest sample
+  buf_out = buf[rd_pos];
+  out = -g * input + buf_out;
+  buf[wp] = input + g * buf_out;
+  wp += 1; wp >= cl ? wp = 0;
+  rvb_ap_wp[idx] = wp;
+  out;
+);
+
+// ─── Process one stereo sample ─────────────────────────────────────────────
+
+function rvb_process(inL, inR)
+local(pre_rp, diffL, diffR,
+      e1L, e2L, e3L, e4L, e1R, e2R, e3R, e4R,
+      h1L, h2L, h3L, h4L, h1R, h2R, h3R, h4R,
+      f1L, f2L, f3L, f4L, f1R, f2R, f3R, f4R,
+      t1L, t2L, t3L, t4L, t1R, t2R, t3R, t4R,
+      sumL, sumR)
+(
+  // ── Pre-delay ──
+  rvb_pre_bufL[rvb_pre_wp] = inL;
+  rvb_pre_bufR[rvb_pre_wp] = inR;
+  pre_rp = rvb_pre_wp - rvb_pre_samps;
+  pre_rp < 0 ? pre_rp += RVB_MAX_PRE;
+  inL = rvb_pre_bufL[pre_rp];
+  inR = rvb_pre_bufR[pre_rp];
+  rvb_pre_wp += 1; rvb_pre_wp >= RVB_MAX_PRE ? rvb_pre_wp = 0;
+
+  // ── Input diffusion — 4 series allpasses per channel ──
+  // Progressively lower gain: first stage smears hard transients,
+  // later stages add density. Lower coefficients preserve drum attack.
+  diffL = _rvb_ap_process(0, inL, 0.50);
+  diffL = _rvb_ap_process(1, diffL, 0.55);
+  diffL = _rvb_ap_process(2, diffL, 0.45);
+  diffL = _rvb_ap_process(3, diffL, 0.40);
+
+  diffR = _rvb_ap_process(4, inR, 0.50);
+  diffR = _rvb_ap_process(5, diffR, 0.55);
+  diffR = _rvb_ap_process(6, diffR, 0.45);
+  diffR = _rvb_ap_process(7, diffR, 0.40);
+
+  // ── Read FDN delay lines (L: 0-3, R: 4-7) ──
+  // L paths use modulated delay lengths; R paths use fixed (asymmetric = wider image)
+  e1L = _rvb_dl_read(0, rvb_lfo_mod1);
+  e2L = _rvb_dl_read(1, rvb_lfo_mod2);
+  e3L = _rvb_dl_read(2, rvb_lfo_mod3);
+  e4L = _rvb_dl_read(3, rvb_lfo_mod4);
+
+  e1R = _rvb_dl_read(4, rvb_dl_len[4]);
+  e2R = _rvb_dl_read(5, rvb_dl_len[5]);
+  e3R = _rvb_dl_read(6, rvb_dl_len[6]);
+  e4R = _rvb_dl_read(7, rvb_dl_len[7]);
+
+  // ── Hadamard mixing matrix (4×4, normalized by 0.5) ──
+  // H = 0.5 * [[1,1,1,1],[1,-1,1,-1],[1,1,-1,-1],[1,-1,-1,1]]
+  h1L = 0.5 * ( e1L + e2L + e3L + e4L);
+  h2L = 0.5 * ( e1L - e2L + e3L - e4L);
+  h3L = 0.5 * ( e1L + e2L - e3L - e4L);
+  h4L = 0.5 * ( e1L - e2L - e3L + e4L);
+
+  h1R = 0.5 * ( e1R + e2R + e3R + e4R);
+  h2R = 0.5 * ( e1R - e2R + e3R - e4R);
+  h3R = 0.5 * ( e1R + e2R - e3R - e4R);
+  h4R = 0.5 * ( e1R - e2R - e3R + e4R);
+
+  // ── One-pole LP damping in feedback path ──
+  f1L = h1L * (1 - rvb_damp_coeff) + rvb_lp_state[0] * rvb_damp_coeff;
+  f2L = h2L * (1 - rvb_damp_coeff) + rvb_lp_state[1] * rvb_damp_coeff;
+  f3L = h3L * (1 - rvb_damp_coeff) + rvb_lp_state[2] * rvb_damp_coeff;
+  f4L = h4L * (1 - rvb_damp_coeff) + rvb_lp_state[3] * rvb_damp_coeff;
+  f1R = h1R * (1 - rvb_damp_coeff) + rvb_lp_state[4] * rvb_damp_coeff;
+  f2R = h2R * (1 - rvb_damp_coeff) + rvb_lp_state[5] * rvb_damp_coeff;
+  f3R = h3R * (1 - rvb_damp_coeff) + rvb_lp_state[6] * rvb_damp_coeff;
+  f4R = h4R * (1 - rvb_damp_coeff) + rvb_lp_state[7] * rvb_damp_coeff;
+  rvb_lp_state[0] = f1L; rvb_lp_state[1] = f2L;
+  rvb_lp_state[2] = f3L; rvb_lp_state[3] = f4L;
+  rvb_lp_state[4] = f1R; rvb_lp_state[5] = f2R;
+  rvb_lp_state[6] = f3R; rvb_lp_state[7] = f4R;
+
+  // ── Write to FDN delay lines: scaled input + asymmetric damped feedback ──
+  // rvb_in_gain scales input inversely with feedback — prevents splashy onset.
+  // Paths 0,2 (L) and 4,6 (R) use fbA; paths 1,3 and 5,7 use fbB (shorter decay).
+  // This asymmetry creates a more natural, less "even" tail.
+  //
+  // Intentional cross-coupling: paths 2,3 inject diffR into L tank; paths 6,7
+  // inject diffL into R tank. Paths 0,1 and 4,5 stay straight. This symmetric
+  // cross-feed creates a wider stereo image by distributing both channels'
+  // energy across both tanks, while keeping the Hadamard mix and asymmetric
+  // feedback for natural decorrelation. Feedback terms (fNL/fNR) stay on
+  // their own side — only the fresh input crosses.
+  //
+  // Denormal protection: +1e-18 on paths 0 and 4 prevents the FDN from
+  // dropping to denormal magnitudes during silent tails (which causes CPU
+  // spikes on some architectures). One injection per L/R tank is sufficient
+  // — the Hadamard mix propagates it to all paths.
+  _rvb_dl_write(0, diffL * rvb_in_gain + f1L * rvb_fbA + RVB_DENORM);
+  _rvb_dl_write(1, diffL * rvb_in_gain + f2L * rvb_fbB);
+  _rvb_dl_write(2, diffR * rvb_in_gain + f3L * rvb_fbA);
+  _rvb_dl_write(3, diffR * rvb_in_gain + f4L * rvb_fbB);
+  _rvb_dl_write(4, diffR * rvb_in_gain + f1R * rvb_fbA + RVB_DENORM);
+  _rvb_dl_write(5, diffR * rvb_in_gain + f2R * rvb_fbB);
+  _rvb_dl_write(6, diffL * rvb_in_gain + f3R * rvb_fbA);
+  _rvb_dl_write(7, diffL * rvb_in_gain + f4R * rvb_fbB);
+
+  // ── Multi-tap output (Dattorro-style) ──
+  // Tap each delay at ~31% of its length for a secondary reflection point.
+  // This adds density without extending the feedback loop.
+  t1L = _rvb_dl_read_tap(0, 0.31);
+  t2L = _rvb_dl_read_tap(1, 0.41);
+  t3L = _rvb_dl_read_tap(2, 0.37);
+  t4L = _rvb_dl_read_tap(3, 0.29);
+  t1R = _rvb_dl_read_tap(4, 0.33);
+  t2R = _rvb_dl_read_tap(5, 0.43);
+  t3R = _rvb_dl_read_tap(6, 0.39);
+  t4R = _rvb_dl_read_tap(7, 0.27);
+
+  // Sum: primary Hadamard outputs + secondary taps
+  // All 4 outputs per channel with alternating signs for richness.
+  // Gains tuned so reverb sits naturally at moderate mix levels.
+  sumL = (h1L - h2L + h3L + h4L) * 0.30
+       + (t1L + t2L - t3L + t4L) * 0.18;
+  sumR = (h1R + h2R - h3R + h4R) * 0.30
+       + (t1R - t2R + t3R + t4R) * 0.18;
+
+  // ── Output HPF (one-pole, removes reverb mud in low end) ──
+  // Subtract LP(signal): state tracks the low-frequency content via α,
+  // then out = in - state removes it. Clean 6dB/oct roll-off.
+  rvb_hpf_on ? (
+    rvb_hpf_stateL += (sumL - rvb_hpf_stateL) * rvb_hpf_alpha;
+    sumL -= rvb_hpf_stateL;
+    rvb_hpf_stateR += (sumR - rvb_hpf_stateR) * rvb_hpf_alpha;
+    sumR -= rvb_hpf_stateR;
+  );
+
+  // ── Stereo width ──
+  rvb_outL = sumL * rvb_w1 + sumR * rvb_w2;
+  rvb_outR = sumR * rvb_w1 + sumL * rvb_w2;
+);

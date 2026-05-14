@@ -1,0 +1,1015 @@
+// rk_swing_ui_panels_controls.jsfx-inc
+// Swing left panel: buttons (SAVE/LOAD, COLORS, STEREO, VEL, MAP, RPT, EXPLORE, BROWSE, CLEAR, UNDO/REDO) + master DRIVE/VOL
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function swing_panels_draw_controls() (
+  // Tooltip state + render lives in rk_swing_tooltips.jsfx-inc.
+  // Per-control hover sites call swing_tooltip_check(zone_id, text);
+  // swing_tooltip_draw() is called once at end of @gfx from
+  // Swing_ReaKit.jsfx (renders the box, resets per-frame state).
+
+  // Button appearance (must be defined before first use)
+  _btn_corner = 2;
+  _btn_cream_r = 0.78; _btn_cream_g = 0.76; _btn_cream_b = 0.72;
+
+  // Button grid area (below LCD panel)
+  _btn_area_y = lcd_y + lcd_h + 4;
+  _btn_area_h = left_h - (lcd_y - left_y + lcd_h + 4);
+  _btn_w = (left_w - 12) / 2;
+  _btn_h = 28;
+  _btn_gap = 4;
+
+  // Row 0: SAVE KIT | LOAD KIT | NEW KIT
+  _bk0_y = _btn_area_y;
+  _btn_w3 = ((left_w - 12) - _btn_gap * 2) / 3;  // 3-button width
+  _bk1_x = 4; _bk2_x = _bk1_x + _btn_w3 + _btn_gap; _bk3_x = _bk2_x + _btn_w3 + _btn_gap;
+
+  // ── SAVE KIT button ── (amber)
+  _kit_sav_active = kit_busy && kit_export_state > 0;
+  _kit_sav_active ? gfx_set(0.85, 0.55, 0.15, 0.9) : gfx_set(0.40, 0.32, 0.15, 1);
+  gfx_rect(_bk1_x, _bk0_y, _btn_w3, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_bk1_x, _bk0_y, _btn_corner, 1); gfx_rect(_bk1_x, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk1_x + _btn_w3 - _btn_corner, _bk0_y, _btn_corner, 1); gfx_rect(_bk1_x + _btn_w3 - 1, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk1_x, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk1_x, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_bk1_x + _btn_w3 - _btn_corner, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk1_x + _btn_w3 - 1, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_bk1_x + _btn_corner, _bk0_y, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk1_x, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_bk1_x + _btn_corner, _bk0_y + _btn_h - 1, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk1_x + _btn_w3 - 1, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  _kit_sav_active ? (
+    gfx_set(1, 1, 1, 0.10);
+    gfx_rect(_bk1_x + 1, _bk0_y + 1, _btn_w3 - 2, 1);
+  );
+  gfx_setfont(1, "Arial", 9, 'b');
+  _kit_sav_active ? gfx_set(1, 1, 1, 1) : gfx_set(0.70, 0.68, 0.65, 1);
+  gfx_measurestr("SAVE", tw, th);
+  gfx_x = _bk1_x + (_btn_w3 - tw) / 2; gfx_y = _bk0_y + (_btn_h - th) / 2; gfx_drawstr("SAVE");
+  _in_save = !kit_busy && mx >= _bk1_x && mx <= _bk1_x+_btn_w3 && my >= _bk0_y && my <= _bk0_y+_btn_h;
+  _in_save ? swing_tooltip_check(10, "Save the current kit. Left-click prompts for a name; right-click for Save As (browse PC).");
+  // LOCK + CMD must be written in the SAME @gfx evaluation. Bridge has a
+  // stale-LOCK self-heal in poll_sidecar_events that clears LOCK whenever
+  // it sees CMD==0 && LOCK!=0 — if we write LOCK here and let state 1 write
+  // CMD=10 on the next tick, the self-heal can fire in the gap and clear
+  // our LOCK before the save flow ever reaches the bridge. Same pattern
+  // as the LOAD button (line ~90), which writes LOCK + CMD=2 atomically.
+  // Skip state 1 entirely and go straight to state 10 with CMD already set.
+  _in_save && lmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      gmem[KIT_GMEM_LOCK] = instance_id;
+      gmem[KIT_GMEM_CMD]  = 10;
+      kit_export_state = 10;
+      kit_busy = 1;
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+  // Right-click SAVE → extended save options
+  _in_save && rmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      resp = gfx_showmenu("Save Kit (.swing)|Save Kit As... (Browse PC)");
+      // Both branches acquire LOCK + set CMD atomically — see comment on
+      // left-click handler above for the race we're avoiding.
+      resp == 1 ? (
+        gmem[KIT_GMEM_LOCK] = instance_id;
+        gmem[KIT_GMEM_CMD]  = 10;
+        kit_export_state = 10;
+        kit_busy = 1;
+      );
+      resp == 2 ? (
+        gmem[KIT_GMEM_LOCK] = instance_id;
+        gmem[KIT_GMEM_CMD]  = 15;
+        kit_export_state = 10;
+        kit_busy = 1;
+      );
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+
+  // ── LOAD KIT button ── (blue)
+  _kit_lod_active = kit_busy && kit_import_state > 0;
+  _kit_lod_active ? gfx_set(0.20, 0.55, 0.85, 0.9) : gfx_set(0.18, 0.28, 0.42, 1);
+  gfx_rect(_bk2_x, _bk0_y, _btn_w3, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_bk2_x, _bk0_y, _btn_corner, 1); gfx_rect(_bk2_x, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk2_x + _btn_w3 - _btn_corner, _bk0_y, _btn_corner, 1); gfx_rect(_bk2_x + _btn_w3 - 1, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk2_x, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk2_x, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_bk2_x + _btn_w3 - _btn_corner, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk2_x + _btn_w3 - 1, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_bk2_x + _btn_corner, _bk0_y, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk2_x, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_bk2_x + _btn_corner, _bk0_y + _btn_h - 1, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk2_x + _btn_w3 - 1, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  _kit_lod_active ? (
+    gfx_set(1, 1, 1, 0.10);
+    gfx_rect(_bk2_x + 1, _bk0_y + 1, _btn_w3 - 2, 1);
+  );
+  gfx_setfont(1, "Arial", 9, 'b');
+  _kit_lod_active ? gfx_set(1, 1, 1, 1) : gfx_set(0.70, 0.68, 0.65, 1);
+  gfx_measurestr("LOAD", tw, th);
+  gfx_x = _bk2_x + (_btn_w3 - tw) / 2; gfx_y = _bk0_y + (_btn_h - th) / 2; gfx_drawstr("LOAD");
+  _in_load = !kit_busy && mx >= _bk2_x && mx <= _bk2_x+_btn_w3 && my >= _bk0_y && my <= _bk0_y+_btn_h;
+  _in_load ? swing_tooltip_check(11, "Load a kit. Left-click opens the kit browser; right-click for Browse PC / Import SFZ / Batch Import Folder / Chop Selection to Pads.");
+  _in_load && lmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      gmem[KIT_GMEM_LOCK] = instance_id;
+      gmem[KIT_GMEM_CMD] = 2;
+      kit_import_state = 1;
+      kit_busy = 1;
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+  // Right-click LOAD → import / utility menu
+  _in_load && rmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      resp = gfx_showmenu("Load Kit (.swing)|Load Kit From... (Browse PC)|Import SFZ Kit...||Batch Import Folder|Chop Selection to Pads");
+      // 1=Load Kit, 2=Browse PC, 3=Import SFZ, 4=Batch, 5=Chop
+      resp == 1 ? ( gmem[KIT_GMEM_LOCK] = instance_id; gmem[KIT_GMEM_CMD] = 2;  kit_import_state = 1; kit_busy = 1; );
+      resp == 2 ? ( gmem[KIT_GMEM_LOCK] = instance_id; gmem[KIT_GMEM_CMD] = 16; kit_import_state = 1; kit_busy = 1; );
+      resp == 3 ? ( gmem[KIT_GMEM_CMD] = 17; );  // file dialog → import_start (handled async by browser, no kit_busy)
+      resp == 4 ? ( gmem[KIT_GMEM_LOCK] = instance_id; gmem[KIT_GMEM_CMD] = 20; kit_import_state = 1; kit_busy = 1; );
+      resp == 5 ? ( gmem[KIT_GMEM_LOCK] = instance_id; gmem[KIT_GMEM_CMD] = 30; kit_import_state = 1; kit_busy = 1; );
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+
+  // ── NEW KIT button ── (coral/red)
+  gfx_set(0.42, 0.20, 0.18, 1);
+  gfx_rect(_bk3_x, _bk0_y, _btn_w3, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_bk3_x, _bk0_y, _btn_corner, 1); gfx_rect(_bk3_x, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk3_x + _btn_w3 - _btn_corner, _bk0_y, _btn_corner, 1); gfx_rect(_bk3_x + _btn_w3 - 1, _bk0_y, 1, _btn_corner);
+  gfx_rect(_bk3_x, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk3_x, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_bk3_x + _btn_w3 - _btn_corner, _bk0_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_bk3_x + _btn_w3 - 1, _bk0_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_bk3_x + _btn_corner, _bk0_y, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk3_x, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_bk3_x + _btn_corner, _bk0_y + _btn_h - 1, _btn_w3 - _btn_corner * 2, 1);
+  gfx_rect(_bk3_x + _btn_w3 - 1, _bk0_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(0.70, 0.68, 0.65, 1);
+  gfx_measurestr("NEW", tw, th);
+  gfx_x = _bk3_x + (_btn_w3 - tw) / 2; gfx_y = _bk0_y + (_btn_h - th) / 2; gfx_drawstr("NEW");
+  _in_new = !kit_busy && mx >= _bk3_x && mx <= _bk3_x+_btn_w3 && my >= _bk0_y && my <= _bk0_y+_btn_h;
+  _in_new ? swing_tooltip_check(12, "New empty kit — clears all pads, resets FX, removes the kit name.");
+  _in_new && lmb_down ? (
+    resp = gfx_showmenu("New Kit - Clear pads, name, and FX chain?");
+    resp == 1 ? (
+      // Full reset (pads + name + FX) via deferred undo path.
+      // (CLEAR button is the "pads only, keep name + FX" sibling action.)
+      gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+        gmem[KIT_GMEM_UNDO_DESC] = 6;
+        gmem[KIT_GMEM_CMD] = 46;
+        _undo_pending = 6;
+      ) : (
+        // Bridge not alive — execute immediately (no undo)
+        swing_new_kit_full_reset();
+      );
+    );
+  );
+
+  // ── Group 1/2 divider ──
+  _div1_y = _bk0_y + _btn_h + 4;
+  gfx_set(0.30, 0.35, 0.38, 0.5);
+  gfx_rect(8, _div1_y, left_w - 16, 1);
+
+  // First row: COLORS | STEREO/MULTI
+  _btn1_x = 4; _btn1_y = _div1_y + 5;
+  _btn2_x = _btn1_x + _btn_w + _btn_gap; _btn2_y = _btn1_y;
+
+  // COLORS button — left-click toggles inline Color Panel; right-click
+  // reveals a small menu (currently: "Reset all pad colors to default").
+  // The palette/theme menu was removed in v43 when the color system
+  // simplified to auto-color modes + Mono + intensity.
+  gfx_set(_btn_cream_r, _btn_cream_g, _btn_cream_b, 1);
+  gfx_rect(_btn1_x, _btn1_y, _btn_w, _btn_h);
+  gfx_set(_btn_cream_r * 0.6, _btn_cream_g * 0.55, _btn_cream_b * 0.50, 0.25);
+  gfx_rect(_btn1_x, _btn1_y + _btn_h, _btn_w, 1);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn1_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn1_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn1_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn1_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn1_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn1_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn1_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn1_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn1_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn1_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn1_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_w - 1, _btn1_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(0.20, 0.20, 0.22, 1);
+  gfx_measurestr("COLORS", tw, th);
+  gfx_x = _btn1_x + (_btn_w - tw) / 2; gfx_y = _btn1_y + (_btn_h - th) / 2; gfx_drawstr("COLORS");
+  _in_colors = mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _btn1_y && my <= _btn1_y+_btn_h;
+  _in_colors ? swing_tooltip_check(13, "Open Color Panel — auto-color modes (Off / DrumType / Output / Folder), Mono toggle, and intensity slider. Right-click to reset all pad colors to default.");
+  // Click toggles the Color Panel inline (auto-color mode, Mono, intensity).
+  // Themes + palettes + Auto-Color-by-name bulk action were removed in v43
+  // (the color system simplified to: auto-color modes + Mono + intensity).
+  _in_colors && lmb_down ? (
+    col_panel_open = !col_panel_open;
+  );
+  // Right-click: reset all pad colors to the evenly-spaced rainbow default
+  // (i / 16.0 for pad i). Clears any manual overrides, black/white markers,
+  // and lets the auto-color mode (if active) re-derive col_auto_hue on the
+  // next sample/output/folder change. Menu confirmation prevents accidental
+  // nuking of carefully-tuned hues.
+  _in_colors && rmb_down ? (
+    resp = gfx_showmenu("Reset all pad colors to default");
+    resp == 1 ? (
+      gi = 0;
+      loop(NUM_PADS,
+        p_color[gi] = gi / 16.0;
+        gi += 1;
+      );
+      col_dirty = 1;
+      mark_dirty();
+    );
+  );
+
+  // Color panel (inline, below COLORS button when open)
+  col_panel_open ? (
+    col_panel_h = swing_color_draw_panel(_btn1_x, _btn1_y + _btn_h + 2, left_w - 8);
+  ) : (
+    col_panel_h = 0;
+  );
+
+  // STEREO / MULTI toggle button — hidden when color panel open
+  _btn2_y = _btn1_y;
+  !col_panel_open ? (
+  multi_out ? gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9) : gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.9);
+  gfx_rect(_btn2_x, _btn2_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn2_x, _btn2_y, _btn_corner, 1); gfx_rect(_btn2_x, _btn2_y, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn2_y, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn2_y, 1, _btn_corner);
+  gfx_rect(_btn2_x, _btn2_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x, _btn2_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn2_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn2_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn2_x + _btn_corner, _btn2_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x, _btn2_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn2_x + _btn_corner, _btn2_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x + _btn_w - 1, _btn2_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(1, 1, 1, 0.10);
+  gfx_rect(_btn2_x + 1, _btn2_y + 1, _btn_w - 2, 1);
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  multi_out ? strcpy(#_mo_lbl, "MULTI") : strcpy(#_mo_lbl, "STEREO");
+  gfx_measurestr(#_mo_lbl, tw, th);
+  gfx_x = _btn2_x + (_btn_w - tw) / 2; gfx_y = _btn2_y + (_btn_h - th) / 2; gfx_drawstr(#_mo_lbl);
+  _in_multi = mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _btn2_y && my <= _btn2_y+_btn_h;
+  _in_multi ? swing_tooltip_check(14, "Toggle output routing. STEREO = all pads to channels 1-2; MULTI = each pad to its own stereo pair (1-2, 3-4, ... 31-32) for per-pad track mixing. Use the MULTI builder via LOAD right-click to create child tracks.");
+  // Left-click: toggle — immediately enforce outputs on all pads
+  _in_multi && lmb_down ? (
+    multi_out = !multi_out;
+    multi_out ? (
+      // Switching to MULTI: auto-assign 1 per pad
+      gi = 0; loop(NUM_PADS, p_output[gi] = gi; gi += 1;);
+    ) : (
+      // Switching to STEREO: reset all to Out 1
+      gi = 0; loop(NUM_PADS, p_output[gi] = 0; gi += 1;);
+    );
+    mark_dirty();
+  );
+  // Right-click: output & routing options
+  _in_multi && rmb_down ? (
+    resp = gfx_showmenu("Auto Assign (1 per pad)|Reset All to Out 1||Build Multi-Out Tracks");
+    resp == 1 ? (
+      gi = 0; loop(NUM_PADS, p_output[gi] = gi; gi += 1;);
+      multi_out = 1; mark_dirty();
+    );
+    resp == 2 ? (
+      gi = 0; loop(NUM_PADS, p_output[gi] = 0; gi += 1;);
+      multi_out = 0; mark_dirty();
+    );
+    resp == 3 ? (
+      gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+        // Acquire lock + sync pad data for multi-out builder
+        gmem[KIT_GMEM_LOCK] == 0 || gmem[KIT_GMEM_LOCK] == instance_id ? (
+          // Switch to MULTI routing + auto-assign one channel per pad up front
+          // so the JSFX is already in multi-out mode by the time the bridge
+          // finishes creating the destination tracks. Without this, user would
+          // see all 16 tracks created but Swing still summing to stereo Out 1
+          // until they clicked the MULTI/STEREO toggle.
+          multi_out = 1;
+          gi = 0; loop(NUM_PADS, p_output[gi] = gi; gi += 1;);
+          mark_dirty();
+          gmem[KIT_GMEM_LOCK] = instance_id;
+          _ki = 0; loop(NUM_PADS,
+            _cn = get_cname_slot(_ki);
+            _cnl = strlen(_cn);
+            _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+              gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] =
+                _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+              _cj += 1;
+            );
+            gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 12] = p_color[_ki];
+            _ki += 1;
+          );
+          gmem[KIT_GMEM_CMD] = 40; kit_import_state = 1; kit_busy = 1;
+        ) : (
+          kit_bridge_warn = 2; // 2 = bridge busy
+        );
+      ) : (
+        kit_bridge_warn = 1;
+      );
+    );
+  );
+  ); // end !col_panel_open
+
+  // Second row: VEL curve | BASE note
+  col_panel_open ? (
+    _btn3_y = _btn1_y + _btn_h + 2 + col_panel_h + _btn_gap;
+  ) : (
+    _btn3_y = _btn2_y + _btn_h + _btn_gap;
+  );
+
+  // VEL curve button — color-coded per mode, left-click cycles, right-click menu, scroll
+  // Colors: LIN=green, SOFT=yellow, HARD=orange, FIX=red
+  vel_curve == 0 ? gfx_set(0.30, 0.65, 0.35, 1) :  // green
+  vel_curve == 1 ? gfx_set(0.78, 0.72, 0.30, 1) :  // yellow
+  vel_curve == 2 ? gfx_set(0.82, 0.50, 0.22, 1) :  // orange
+                   gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.9);  // red
+  gfx_rect(_btn1_x, _btn3_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn3_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn3_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn3_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn3_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn3_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn3_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn3_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn3_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn3_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn3_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn3_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_w - 1, _btn3_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  vel_curve == 0 ? strcpy(#_vc, "VEL: LIN") :
+  vel_curve == 1 ? strcpy(#_vc, "VEL: SOFT") :
+  vel_curve == 2 ? strcpy(#_vc, "VEL: HARD") :
+                   strcpy(#_vc, "VEL: FIX");
+  gfx_measurestr(#_vc, tw, th);
+  gfx_x = _btn1_x + (_btn_w - tw) / 2; gfx_y = _btn3_y + (_btn_h - th) / 2; gfx_drawstr(#_vc);
+  _in_vel = mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _btn3_y && my <= _btn3_y+_btn_h;
+  _in_vel ? swing_tooltip_check(2, "Velocity response curve — Linear / Soft / Hard / Fixed. Left-click cycles; right-click menu; scroll wheel also cycles.");
+  _in_vel && lmb_down ? (
+    vel_curve = (vel_curve + 1) % 4; mark_dirty();
+  );
+  _in_vel && rmb_down ? (
+    resp = gfx_showmenu("Linear|Soft|Hard|Fixed");
+    resp > 0 ? ( vel_curve = resp - 1; mark_dirty(); );
+  );
+  // Scroll wheel: cycle vel curves
+  _in_vel && frame_wheel != 0 ? (
+    vel_curve = vel_curve + sign_of(frame_wheel);
+    vel_curve < 0 ? vel_curve = 3;
+    vel_curve > 3 ? vel_curve = 0;
+    mark_dirty();
+  );
+
+  // MAPPING button — cream background, cycles note map presets
+  gfx_set(_btn_cream_r, _btn_cream_g, _btn_cream_b, 1);
+  gfx_rect(_btn2_x, _btn3_y, _btn_w, _btn_h);
+  gfx_set(_btn_cream_r * 0.6, _btn_cream_g * 0.55, _btn_cream_b * 0.50, 0.25);
+  gfx_rect(_btn2_x, _btn3_y + _btn_h, _btn_w, 1);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn2_x, _btn3_y, _btn_corner, 1); gfx_rect(_btn2_x, _btn3_y, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn3_y, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn3_y, 1, _btn_corner);
+  gfx_rect(_btn2_x, _btn3_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x, _btn3_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn3_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn3_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn2_x + _btn_corner, _btn3_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x, _btn3_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn2_x + _btn_corner, _btn3_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x + _btn_w - 1, _btn3_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(0.20, 0.20, 0.22, 1);
+  note_map == 0 ? strcpy(#_map_lbl, "MAP:CHROM") :
+  note_map == 1 ? strcpy(#_map_lbl, "MAP:WHITE") :
+  note_map == 2 ? strcpy(#_map_lbl, "MAP:GM") :
+  note_map == 3 ? strcpy(#_map_lbl, "MAP:BLACK") :
+  note_map == 4 ? strcpy(#_map_lbl, "MAP:MPC") :
+  note_map == 5 ? strcpy(#_map_lbl, "MAP:MSCHNE") :
+  note_map == 6 ? strcpy(#_map_lbl, "MAP:LNCHPD") :
+                  strcpy(#_map_lbl, "MAP:PUSH");
+  gfx_measurestr(#_map_lbl, tw, th);
+  gfx_x = _btn2_x + (_btn_w - tw) / 2; gfx_y = _btn3_y + (_btn_h - th) / 2; gfx_drawstr(#_map_lbl);
+  _in_map = mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _btn3_y && my <= _btn3_y+_btn_h;
+  _in_map ? swing_tooltip_check(15, "MIDI note mapping — left-click cycles common scales/banks; right-click for full menu of bank/scale presets (Chromatic, GM-style, MPC, etc.).");
+  // Left-click: cycle mapping presets and apply
+  _in_map && lmb_down ? (
+    note_map = (note_map + 1) % 8;
+    // Apply mapping preset to all unlocked pads
+    note_map == 0 ? (
+      // Chromatic from C2 (36)
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = 36 + gi;); gi += 1;);
+    ) : note_map == 1 ? (
+      // White keys from C2: C D E F G A B C D E F G A B C D
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      !p_note_lock[0]  ? p_note[0]  = 36;
+      !p_note_lock[1]  ? p_note[1]  = 38;
+      !p_note_lock[2]  ? p_note[2]  = 40;
+      !p_note_lock[3]  ? p_note[3]  = 41;
+      !p_note_lock[4]  ? p_note[4]  = 43;
+      !p_note_lock[5]  ? p_note[5]  = 45;
+      !p_note_lock[6]  ? p_note[6]  = 47;
+      !p_note_lock[7]  ? p_note[7]  = 48;
+      !p_note_lock[8]  ? p_note[8]  = 50;
+      !p_note_lock[9]  ? p_note[9]  = 52;
+      !p_note_lock[10] ? p_note[10] = 53;
+      !p_note_lock[11] ? p_note[11] = 55;
+      !p_note_lock[12] ? p_note[12] = 57;
+      !p_note_lock[13] ? p_note[13] = 59;
+      !p_note_lock[14] ? p_note[14] = 60;
+      !p_note_lock[15] ? p_note[15] = 62;
+    ) : note_map == 2 ? (
+      // General MIDI Drum Map
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      !p_note_lock[0]  ? p_note[0]  = 36;  // Kick
+      !p_note_lock[1]  ? p_note[1]  = 38;  // Snare
+      !p_note_lock[2]  ? p_note[2]  = 37;  // Side Stick
+      !p_note_lock[3]  ? p_note[3]  = 39;  // Clap
+      !p_note_lock[4]  ? p_note[4]  = 42;  // HH Closed
+      !p_note_lock[5]  ? p_note[5]  = 44;  // HH Pedal
+      !p_note_lock[6]  ? p_note[6]  = 46;  // HH Open
+      !p_note_lock[7]  ? p_note[7]  = 41;  // Tom Low
+      !p_note_lock[8]  ? p_note[8]  = 47;  // Tom Mid
+      !p_note_lock[9]  ? p_note[9]  = 50;  // Tom Hi
+      !p_note_lock[10] ? p_note[10] = 49;  // Crash 1
+      !p_note_lock[11] ? p_note[11] = 51;  // Ride
+      !p_note_lock[12] ? p_note[12] = 57;  // Crash 2
+      !p_note_lock[13] ? p_note[13] = 54;  // Tambourine
+      !p_note_lock[14] ? p_note[14] = 56;  // Cowbell
+      !p_note_lock[15] ? p_note[15] = 75;  // Claves
+    ) : note_map == 3 ? (
+      // Black keys (sharps/flats) from C#2 spanning 3 octaves
+      root_note = 37; slider1 = root_note; slider_automate(slider1);
+      !p_note_lock[0]  ? p_note[0]  = 37;  // C#2
+      !p_note_lock[1]  ? p_note[1]  = 39;  // D#2
+      !p_note_lock[2]  ? p_note[2]  = 42;  // F#2
+      !p_note_lock[3]  ? p_note[3]  = 44;  // G#2
+      !p_note_lock[4]  ? p_note[4]  = 46;  // A#2
+      !p_note_lock[5]  ? p_note[5]  = 49;  // C#3
+      !p_note_lock[6]  ? p_note[6]  = 51;  // D#3
+      !p_note_lock[7]  ? p_note[7]  = 54;  // F#3
+      !p_note_lock[8]  ? p_note[8]  = 56;  // G#3
+      !p_note_lock[9]  ? p_note[9]  = 58;  // A#3
+      !p_note_lock[10] ? p_note[10] = 61;  // C#4
+      !p_note_lock[11] ? p_note[11] = 63;  // D#4
+      !p_note_lock[12] ? p_note[12] = 66;  // F#4
+      !p_note_lock[13] ? p_note[13] = 68;  // G#4
+      !p_note_lock[14] ? p_note[14] = 70;  // A#4
+      !p_note_lock[15] ? p_note[15] = 73;  // C#5
+    ) : note_map == 4 ? (
+      // Akai MPC (Bank A) — C#1 sequential
+      root_note = 37; slider1 = root_note; slider_automate(slider1);
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = 37 + gi;); gi += 1;);
+    ) : note_map == 5 ? (
+      // NI Maschine (Group A) — C1 sequential
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = 36 + gi;); gi += 1;);
+    ) : note_map == 6 ? (
+      // Novation Launchpad (Drum Rack 4x4) — rows spaced 8 apart
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      !p_note_lock[0]  ? p_note[0]  = 36;
+      !p_note_lock[1]  ? p_note[1]  = 37;
+      !p_note_lock[2]  ? p_note[2]  = 38;
+      !p_note_lock[3]  ? p_note[3]  = 39;
+      !p_note_lock[4]  ? p_note[4]  = 44;
+      !p_note_lock[5]  ? p_note[5]  = 45;
+      !p_note_lock[6]  ? p_note[6]  = 46;
+      !p_note_lock[7]  ? p_note[7]  = 47;
+      !p_note_lock[8]  ? p_note[8]  = 52;
+      !p_note_lock[9]  ? p_note[9]  = 53;
+      !p_note_lock[10] ? p_note[10] = 54;
+      !p_note_lock[11] ? p_note[11] = 55;
+      !p_note_lock[12] ? p_note[12] = 60;
+      !p_note_lock[13] ? p_note[13] = 61;
+      !p_note_lock[14] ? p_note[14] = 62;
+      !p_note_lock[15] ? p_note[15] = 63;
+    ) : (
+      // Ableton Push (Drum Rack 4x4) — same grid layout as Launchpad
+      root_note = 36; slider1 = root_note; slider_automate(slider1);
+      !p_note_lock[0]  ? p_note[0]  = 36;
+      !p_note_lock[1]  ? p_note[1]  = 37;
+      !p_note_lock[2]  ? p_note[2]  = 38;
+      !p_note_lock[3]  ? p_note[3]  = 39;
+      !p_note_lock[4]  ? p_note[4]  = 44;
+      !p_note_lock[5]  ? p_note[5]  = 45;
+      !p_note_lock[6]  ? p_note[6]  = 46;
+      !p_note_lock[7]  ? p_note[7]  = 47;
+      !p_note_lock[8]  ? p_note[8]  = 52;
+      !p_note_lock[9]  ? p_note[9]  = 53;
+      !p_note_lock[10] ? p_note[10] = 54;
+      !p_note_lock[11] ? p_note[11] = 55;
+      !p_note_lock[12] ? p_note[12] = 60;
+      !p_note_lock[13] ? p_note[13] = 61;
+      !p_note_lock[14] ? p_note[14] = 62;
+      !p_note_lock[15] ? p_note[15] = 63;
+    );
+    mark_dirty();
+  );
+  // Right-click: full mapping menu with controller banks
+  // Flat menu: 1-4 scale presets, 5-8 MPC banks, 9-12 Maschine groups, 13-14 LP/Push, 15 custom
+  _in_map && rmb_down ? (
+    resp = gfx_showmenu("Chromatic from C2|White Keys from C2|GM Drum Map|Black Keys from C#2||MPC Bank A (C#1)|MPC Bank B (F2)|MPC Bank C (A3)|MPC Bank D (C#5)||Maschine Grp A (C1)|Maschine Grp B (E2)|Maschine Grp C (G#3)|Maschine Grp D (C5)||Launchpad (Drum Rack)|Push (Drum Rack)||Set Custom Root...");
+    // --- Scale presets (resp 1-4) ---
+    resp == 1 ? (
+      note_map = 0; root_note = 36; slider1 = root_note;
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = 36 + gi;); gi += 1;);
+    ) : resp == 2 ? (
+      note_map = 1; root_note = 36; slider1 = root_note;
+      !p_note_lock[0] ? p_note[0] = 36; !p_note_lock[1] ? p_note[1] = 38;
+      !p_note_lock[2] ? p_note[2] = 40; !p_note_lock[3] ? p_note[3] = 41;
+      !p_note_lock[4] ? p_note[4] = 43; !p_note_lock[5] ? p_note[5] = 45;
+      !p_note_lock[6] ? p_note[6] = 47; !p_note_lock[7] ? p_note[7] = 48;
+      !p_note_lock[8] ? p_note[8] = 50; !p_note_lock[9] ? p_note[9] = 52;
+      !p_note_lock[10] ? p_note[10] = 53; !p_note_lock[11] ? p_note[11] = 55;
+      !p_note_lock[12] ? p_note[12] = 57; !p_note_lock[13] ? p_note[13] = 59;
+      !p_note_lock[14] ? p_note[14] = 60; !p_note_lock[15] ? p_note[15] = 62;
+    ) : resp == 3 ? (
+      note_map = 2; root_note = 36; slider1 = root_note;
+      !p_note_lock[0] ? p_note[0] = 36; !p_note_lock[1] ? p_note[1] = 38;
+      !p_note_lock[2] ? p_note[2] = 37; !p_note_lock[3] ? p_note[3] = 39;
+      !p_note_lock[4] ? p_note[4] = 42; !p_note_lock[5] ? p_note[5] = 44;
+      !p_note_lock[6] ? p_note[6] = 46; !p_note_lock[7] ? p_note[7] = 41;
+      !p_note_lock[8] ? p_note[8] = 47; !p_note_lock[9] ? p_note[9] = 50;
+      !p_note_lock[10] ? p_note[10] = 49; !p_note_lock[11] ? p_note[11] = 51;
+      !p_note_lock[12] ? p_note[12] = 57; !p_note_lock[13] ? p_note[13] = 54;
+      !p_note_lock[14] ? p_note[14] = 56; !p_note_lock[15] ? p_note[15] = 75;
+    ) : resp == 4 ? (
+      note_map = 3; root_note = 37; slider1 = root_note;
+      !p_note_lock[0] ? p_note[0] = 37; !p_note_lock[1] ? p_note[1] = 39;
+      !p_note_lock[2] ? p_note[2] = 42; !p_note_lock[3] ? p_note[3] = 44;
+      !p_note_lock[4] ? p_note[4] = 46; !p_note_lock[5] ? p_note[5] = 49;
+      !p_note_lock[6] ? p_note[6] = 51; !p_note_lock[7] ? p_note[7] = 54;
+      !p_note_lock[8] ? p_note[8] = 56; !p_note_lock[9] ? p_note[9] = 58;
+      !p_note_lock[10] ? p_note[10] = 61; !p_note_lock[11] ? p_note[11] = 63;
+      !p_note_lock[12] ? p_note[12] = 66; !p_note_lock[13] ? p_note[13] = 68;
+      !p_note_lock[14] ? p_note[14] = 70; !p_note_lock[15] ? p_note[15] = 73;
+    );
+    // --- MPC Banks A-D (resp 5-8): sequential from root ---
+    resp >= 5 && resp <= 8 ? (
+      note_map = 4;
+      _bank_root = 37 + (resp - 5) * 16;  // A=37, B=53, C=69, D=85
+      root_note = _bank_root; slider1 = root_note;
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = _bank_root + gi;); gi += 1;);
+    );
+    // --- Maschine Groups A-D (resp 9-12): sequential from root ---
+    resp >= 9 && resp <= 12 ? (
+      note_map = 5;
+      _bank_root = 36 + (resp - 9) * 16;  // A=36, B=52, C=68, D=84
+      root_note = _bank_root; slider1 = root_note;
+      gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = _bank_root + gi;); gi += 1;);
+    );
+    // --- Launchpad / Push drum rack (resp 13-14) ---
+    resp == 13 || resp == 14 ? (
+      note_map = resp == 13 ? 6 : 7;
+      root_note = 36; slider1 = root_note;
+      !p_note_lock[0] ? p_note[0] = 36; !p_note_lock[1] ? p_note[1] = 37;
+      !p_note_lock[2] ? p_note[2] = 38; !p_note_lock[3] ? p_note[3] = 39;
+      !p_note_lock[4] ? p_note[4] = 44; !p_note_lock[5] ? p_note[5] = 45;
+      !p_note_lock[6] ? p_note[6] = 46; !p_note_lock[7] ? p_note[7] = 47;
+      !p_note_lock[8] ? p_note[8] = 52; !p_note_lock[9] ? p_note[9] = 53;
+      !p_note_lock[10] ? p_note[10] = 54; !p_note_lock[11] ? p_note[11] = 55;
+      !p_note_lock[12] ? p_note[12] = 60; !p_note_lock[13] ? p_note[13] = 61;
+      !p_note_lock[14] ? p_note[14] = 62; !p_note_lock[15] ? p_note[15] = 63;
+    );
+    // Apply slider changes for all preset selections
+    resp >= 1 && resp <= 14 ? (
+      slider_automate(slider1); mark_dirty();
+    );
+    // --- Custom root (resp 15) ---
+    resp == 15 ? (
+      _rsp2 = gfx_showmenu("C1 (24)|C#1 (25)|D1 (26)|D#1 (27)|E1 (28)|F1 (29)|F#1 (30)|G1 (31)|G#1 (32)|A1 (33)|A#1 (34)|B1 (35)|C2 (36)|C#2 (37)|D2 (38)|D#2 (39)|E2 (40)|F2 (41)|F#2 (42)|G2 (43)|G#2 (44)|A2 (45)|A#2 (46)|B2 (47)|C3 (48)");
+      _rsp2 > 0 ? (
+        root_note = _rsp2 + 23; note_map = 0;
+        slider1 = root_note; slider_automate(slider1);
+        gi = 0; loop(NUM_PADS, !p_note_lock[gi] ? (p_note[gi] = root_note + gi;); gi += 1;);
+        mark_dirty();
+      );
+    );
+  );
+
+  // ── Group 2/3 divider ──
+  _div2_y = _btn3_y + _btn_h + 4;
+  gfx_set(0.30, 0.35, 0.38, 0.5);
+  gfx_rect(8, _div2_y, left_w - 16, 1);
+
+  // Global 1SHOT / GATE — full-width buttons side by side (like RPT | EXPLORE)
+  _os_y = _div2_y + 5;
+
+  // ── 1SHOT button (left, full _btn_w) ──
+  oneshot_global ? gfx_set(0.85, 0.65, 0.10, 0.9) : gfx_set(0.28, 0.28, 0.30, 0.5);
+  gfx_rect(_btn1_x, _os_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _os_y, _btn_corner, 1); gfx_rect(_btn1_x, _os_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _os_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _os_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _os_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _os_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _os_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _os_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _os_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _os_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _os_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_w - 1, _os_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  oneshot_global ? ( gfx_set(1, 1, 1, 0.10); gfx_rect(_btn1_x + 1, _os_y + 1, _btn_w - 2, 1); );
+  gfx_setfont(1, "Arial", 9, 'b');
+  oneshot_global ? gfx_set(0, 0, 0, 1) : gfx_set(0.45, 0.45, 0.48, 1);
+  gfx_measurestr("1SHOT", tw, th);
+  gfx_x = _btn1_x + (_btn_w - tw) / 2; gfx_y = _os_y + (_btn_h - th) / 2; gfx_drawstr("1SHOT");
+  mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _os_y && my <= _os_y+_btn_h ? swing_tooltip_check(16, "Global 1-Shot mode — pads play to the end on a single hit regardless of MIDI note-off. Per-pad override via the right-click overlay.");
+  mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _os_y && my <= _os_y+_btn_h && lmb_down ? (
+    !oneshot_global ? ( oneshot_global = 1; mark_dirty(); );
+  );
+
+  // ── GATE button (right, full _btn_w) ──
+  !oneshot_global ? gfx_set(0.20, 0.55, 0.85, 0.9) : gfx_set(0.28, 0.28, 0.30, 0.5);
+  gfx_rect(_btn2_x, _os_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn2_x, _os_y, _btn_corner, 1); gfx_rect(_btn2_x, _os_y, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _os_y, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _os_y, 1, _btn_corner);
+  gfx_rect(_btn2_x, _os_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x, _os_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _os_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _os_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn2_x + _btn_corner, _os_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x, _os_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn2_x + _btn_corner, _os_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x + _btn_w - 1, _os_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  !oneshot_global ? ( gfx_set(1, 1, 1, 0.10); gfx_rect(_btn2_x + 1, _os_y + 1, _btn_w - 2, 1); );
+  gfx_setfont(1, "Arial", 9, 'b');
+  !oneshot_global ? gfx_set(0, 0, 0, 1) : gfx_set(0.45, 0.45, 0.48, 1);
+  gfx_measurestr("GATE", tw, th);
+  gfx_x = _btn2_x + (_btn_w - tw) / 2; gfx_y = _os_y + (_btn_h - th) / 2; gfx_drawstr("GATE");
+  mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _os_y && my <= _os_y+_btn_h ? swing_tooltip_check(17, "Global Gate mode — pads play only while the MIDI note is held; note-off cuts the voice. Opposite of 1-Shot.");
+  mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _os_y && my <= _os_y+_btn_h && lmb_down ? (
+    oneshot_global ? ( oneshot_global = 0; mark_dirty(); );
+  );
+
+  // Third row: RPT | EXPLORE
+  _btn5_y = _os_y + _btn_h + _btn_gap;
+
+  // RPT button — red when active, blue when off
+  repeat_div > 0 ? gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.9) : gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9);
+  gfx_rect(_btn1_x, _btn5_y, _btn_w, _btn_h);
+  // Round corners
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn5_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn5_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn5_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn5_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn5_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn5_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn5_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn5_y + _btn_h - _btn_corner, 1, _btn_corner);
+  // Enhanced 3D bevel
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn5_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn5_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn5_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_w - 1, _btn5_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  // Inner glow for active state
+  repeat_div > 0 ? (
+    gfx_set(1, 1, 1, 0.10);
+    gfx_rect(_btn1_x + 1, _btn5_y + 1, _btn_w - 2, 1);
+  );
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  repeat_div == 0 ? strcpy(#_rpt_lbl, "RPT OFF") : (
+    get_rpt_div_name(repeat_div); strcpy(#_rpt_lbl, #_rpt_name);
+  );
+  gfx_measurestr(#_rpt_lbl, tw, th);
+  gfx_x = _btn1_x + (_btn_w - tw) / 2; gfx_y = _btn5_y + (_btn_h - th) / 2; gfx_drawstr(#_rpt_lbl);
+  _in_rpt = mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _btn5_y && my <= _btn5_y+_btn_h;
+  _in_rpt ? swing_tooltip_check(1, "Repeat division for held notes — left-click cycles OFF/1/4/1/8/1/16/1/32/1/64; right-click for full menu (straight/triplet/dotted)");
+  // Left-click: cycle straight divisions (OFF→1/4→1/8→1/16→1/32→1/64→OFF)
+  _in_rpt && lmb_down ? (
+    repeat_div == 0  ? repeat_div = 1  :  // OFF → 1/4
+    repeat_div == 1  ? repeat_div = 4  :  // 1/4 → 1/8
+    repeat_div == 4  ? repeat_div = 7  :  // 1/8 → 1/16
+    repeat_div == 7  ? repeat_div = 10 :  // 1/16 → 1/32
+    repeat_div == 10 ? repeat_div = 13 :  // 1/32 → 1/64
+    repeat_div = 0;                        // anything else → OFF
+    rpt_counter = 0; mark_dirty();
+  );
+  // Right-click: full menu with all divisions
+  _in_rpt && rmb_down ? (
+    resp = gfx_showmenu("OFF|1/4|1/4 T|1/4 D||1/8|1/8 T|1/8 D||1/16|1/16 T|1/16 D||1/32|1/32 T|1/32 D||1/64|1/64 T|1/64 D");
+    resp > 0 ? (
+      repeat_div = resp - 1;  // 1=OFF(0), 2=1/4(1), 3=1/4T(2), etc
+      rpt_counter = 0; mark_dirty();
+    );
+  );
+  // Scroll wheel: cycle through all divisions
+  _in_rpt && frame_wheel != 0 ? (
+    repeat_div = repeat_div + sign_of(frame_wheel);
+    repeat_div < 0 ? repeat_div = RPT_NUM_DIVS;
+    repeat_div > RPT_NUM_DIVS ? repeat_div = 0;
+    rpt_counter = 0; mark_dirty();
+  );
+
+  // EXPLORER button — blue, teal when REAPER Media Explorer is open
+  media_explorer_running ? gfx_set(0.20, 0.65, 0.55, 0.9) : gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9);
+  gfx_rect(_btn2_x, _btn5_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn2_x, _btn5_y, _btn_corner, 1); gfx_rect(_btn2_x, _btn5_y, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn5_y, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn5_y, 1, _btn_corner);
+  gfx_rect(_btn2_x, _btn5_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x, _btn5_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn5_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn5_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn2_x + _btn_corner, _btn5_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x, _btn5_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn2_x + _btn_corner, _btn5_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x + _btn_w - 1, _btn5_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  media_explorer_running ? (
+    gfx_set(1, 1, 1, 0.10);
+    gfx_rect(_btn2_x + 1, _btn5_y + 1, _btn_w - 2, 1);
+  );
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(1, 1, 1, 1);
+  gfx_measurestr("EXPLORE", tw, th);
+  gfx_x = _btn2_x + (_btn_w - tw) / 2; gfx_y = _btn5_y + (_btn_h - th) / 2; gfx_drawstr("EXPLORE");
+  mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _btn5_y && my <= _btn5_y+_btn_h ? swing_tooltip_check(18, "Toggle REAPER's Media Explorer. Drag samples directly from it onto pads.");
+  mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _btn5_y && my <= _btn5_y+_btn_h && lmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      gmem[KIT_GMEM_CMD] == 0 ? gmem[KIT_GMEM_CMD] = 45;
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+
+  // BROWSE button — full width, opens EON Sample Browser via CMD 60
+  _btn6_y = _btn5_y + _btn_h + _btn_gap;
+  _btn6_w = _btn_w * 2 + _btn_gap;
+  browser_running ? gfx_set(0.20, 0.65, 0.55, 0.9) : gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9);
+  gfx_rect(_btn1_x, _btn6_y, _btn6_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn6_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn6_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn6_w - _btn_corner, _btn6_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn6_w - 1, _btn6_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn6_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn6_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn6_w - _btn_corner, _btn6_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn6_w - 1, _btn6_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn6_y, _btn6_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn6_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn6_y + _btn_h - 1, _btn6_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn6_w - 1, _btn6_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  browser_running ? (
+    gfx_set(1, 1, 1, 0.10);
+    gfx_rect(_btn1_x + 1, _btn6_y + 1, _btn6_w - 2, 1);
+  );
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(1, 1, 1, 1);
+  gfx_measurestr("BROWSE", tw, th);
+  gfx_x = _btn1_x + (_btn6_w - tw) / 2; gfx_y = _btn6_y + (_btn_h - th) / 2; gfx_drawstr("BROWSE");
+  mx >= _btn1_x && mx <= _btn1_x+_btn6_w && my >= _btn6_y && my <= _btn6_y+_btn_h ? swing_tooltip_check(19, "Open the Swing sample browser (categorized file list, audio preview, drag-to-pad). Requires ReaImGui — see banner if not installed.");
+  mx >= _btn1_x && mx <= _btn1_x+_btn6_w && my >= _btn6_y && my <= _btn6_y+_btn_h && lmb_down ? (
+    gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 ? (
+      gmem[KIT_GMEM_CMD] == 0 ? (
+        gmem[KIT_GMEM_PARAM1] = sel_pad;  // target pad for browser-driven action
+        // Claim browser routing: subsequent CMD 63/64 sample loads + the
+        // browser's window-size and pad-select sync land on this instance,
+        // not on whatever other Swing instance happens to also be running.
+        gmem[KIT_GMEM_INSTANCE] = instance_id;
+        gmem[KIT_GMEM_CMD] = 60;    // CMD 60 = open browser
+      );
+    ) : (
+      kit_bridge_warn = 1;
+    );
+  );
+
+  // ── Preferences row: SEL TRK + TIPS toggles ───────────────────────
+  // Two side-by-side toggle buttons between BROWSE and CLEAR.
+  //   SEL TRK: when ON, clicking a pad selects the matching multi-out
+  //            track in REAPER's TCP (gated on bridge alive in pad
+  //            click handler). Off by default; opt-in.
+  //   TIPS:    toggles the global tooltip overlay. Default ON.
+  _btn8_y = _btn6_y + _btn_h + _btn_gap;
+
+  // SEL TRK (left)
+  pad_click_selects_track ? gfx_set(0.20, 0.65, 0.55, 0.9) : gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9);
+  gfx_rect(_btn1_x, _btn8_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn8_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn8_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn8_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn8_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn8_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn8_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_w - _btn_corner, _btn8_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_w - 1, _btn8_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn8_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn8_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn8_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_w - 1, _btn8_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  gfx_measurestr("SEL TRK", tw, th);
+  gfx_x = _btn1_x + (_btn_w - tw) / 2; gfx_y = _btn8_y + (_btn_h - th) / 2; gfx_drawstr("SEL TRK");
+  _in_seltrk = mx >= _btn1_x && mx <= _btn1_x+_btn_w && my >= _btn8_y && my <= _btn8_y+_btn_h;
+  _in_seltrk ? swing_tooltip_check(22, "When ON, clicking a pad selects the corresponding multi-out child track in REAPER's TCP and scrolls it into view. Requires MULTI mode + multi-out tracks built via LOAD right-click.");
+  _in_seltrk && lmb_down ? (
+    pad_click_selects_track = !pad_click_selects_track;
+    mark_dirty();  // persist via the dirty counter
+  );
+
+  // TIPS (right) — global tooltip on/off toggle
+  tooltips_enabled ? gfx_set(0.20, 0.65, 0.55, 0.9) : gfx_set(btn_blue_r, btn_blue_g, btn_blue_b, 0.9);
+  gfx_rect(_btn2_x, _btn8_y, _btn_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn2_x, _btn8_y, _btn_corner, 1); gfx_rect(_btn2_x, _btn8_y, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn8_y, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn8_y, 1, _btn_corner);
+  gfx_rect(_btn2_x, _btn8_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x, _btn8_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn2_x + _btn_w - _btn_corner, _btn8_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn2_x + _btn_w - 1, _btn8_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn2_x + _btn_corner, _btn8_y, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x, _btn8_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn2_x + _btn_corner, _btn8_y + _btn_h - 1, _btn_w - _btn_corner * 2, 1);
+  gfx_rect(_btn2_x + _btn_w - 1, _btn8_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 8, 'b');
+  gfx_set(1, 1, 1, 1);
+  strcpy(#_tips_lbl, tooltips_enabled ? "TIPS ON" : "TIPS OFF");
+  gfx_measurestr(#_tips_lbl, tw, th);
+  gfx_x = _btn2_x + (_btn_w - tw) / 2; gfx_y = _btn8_y + (_btn_h - th) / 2; gfx_drawstr(#_tips_lbl);
+  _in_tips = mx >= _btn2_x && mx <= _btn2_x+_btn_w && my >= _btn8_y && my <= _btn8_y+_btn_h;
+  _in_tips ? swing_tooltip_check(23, "Toggle hover tooltips on or off. When OFF, no tooltips appear over any control.");
+  _in_tips && lmb_down ? (
+    tooltips_enabled = !tooltips_enabled;
+    mark_dirty();
+  );
+
+  // ── Group 3/4 divider ──
+  _div3_y = _btn8_y + _btn_h + 4;
+  gfx_set(0.30, 0.35, 0.38, 0.5);
+  gfx_rect(8, _div3_y, left_w - 16, 1);
+
+  // Fourth row: CLEAR (full width — REAPER's Ctrl+Z handles undo for clear/swap/load via the deferred CMD 46/48 system)
+  _btn7_y = _div3_y + 5;
+  _btn_full_w = _btn_w * 2 + _btn_gap;
+
+  // CLEAR ALL button — red, clears all 16 pads (with confirmation)
+  gfx_set(btn_red_r, btn_red_g, btn_red_b, 0.9);
+  gfx_rect(_btn1_x, _btn7_y, _btn_full_w, _btn_h);
+  gfx_set(pad_well_r, pad_well_g, pad_well_b, 1);
+  gfx_rect(_btn1_x, _btn7_y, _btn_corner, 1); gfx_rect(_btn1_x, _btn7_y, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_full_w - _btn_corner, _btn7_y, _btn_corner, 1); gfx_rect(_btn1_x + _btn_full_w - 1, _btn7_y, 1, _btn_corner);
+  gfx_rect(_btn1_x, _btn7_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x, _btn7_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_rect(_btn1_x + _btn_full_w - _btn_corner, _btn7_y + _btn_h - 1, _btn_corner, 1); gfx_rect(_btn1_x + _btn_full_w - 1, _btn7_y + _btn_h - _btn_corner, 1, _btn_corner);
+  gfx_set(1, 1, 1, 0.15); gfx_rect(_btn1_x + _btn_corner, _btn7_y, _btn_full_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x, _btn7_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_set(0, 0, 0, 0.20);
+  gfx_rect(_btn1_x + _btn_corner, _btn7_y + _btn_h - 1, _btn_full_w - _btn_corner * 2, 1);
+  gfx_rect(_btn1_x + _btn_full_w - 1, _btn7_y + _btn_corner, 1, _btn_h - _btn_corner * 2);
+  gfx_setfont(1, "Arial", 9, 'b');
+  gfx_set(1, 1, 1, 1);
+  gfx_measurestr("CLEAR", tw, th);
+  gfx_x = _btn1_x + (_btn_full_w - tw) / 2; gfx_y = _btn7_y + (_btn_h - th) / 2; gfx_drawstr("CLEAR");
+  mx >= _btn1_x && mx <= _btn1_x+_btn_full_w && my >= _btn7_y && my <= _btn7_y+_btn_h ? swing_tooltip_check(20, "Clear all 16 pads (audio + names + per-pad FX). Asks for confirmation. Ctrl+Z restores everything via REAPER's undo.");
+  mx >= _btn1_x && mx <= _btn1_x+_btn_full_w && my >= _btn7_y && my <= _btn7_y+_btn_h && lmb_down ? (
+    resp = gfx_showmenu("Clear all pads (keep kit name + FX)?|---| ");
+    resp == 1 ? (
+      // Queue clear all — deferred until bridge opens undo block
+      gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+        gmem[KIT_GMEM_UNDO_DESC] = 1;
+        gmem[KIT_GMEM_CMD] = 46;
+        _undo_pending = 1;
+      ) : (
+        // Bridge not alive — execute immediately (no undo)
+        gi = 0; loop(NUM_PADS, clear_pad(gi); gi += 1;);
+      );
+    );
+  );
+
+);
+
+function swing_panels_draw_master() (
+  // Available area below last button row
+  _ctrl_area_y = _btn7_y + _btn_h + 8;
+  _ctrl_area_h = gfx_h - _ctrl_area_y - 6;
+
+  // Side-by-side layout: DRIVE on left, VOL on right
+  _drv_zone_w = (left_w * 0.28)|0;
+  _knob_zone_w = left_w - _drv_zone_w;
+
+  // Master VOL knob sizing (fits right side of left panel — BIG).
+  // Cap was 42 (height) — raised to 65 so the knob keeps growing on
+  // stretched windows without becoming oversized. Width and height fits
+  // still dominate on small windows; the cap is just a sanity ceiling.
+  _mvol_r = min(65, (_ctrl_area_h - 16) / 2);
+  _mvol_r = min(_mvol_r, (_knob_zone_w / 2 - 8));
+  _mvol_r = max(26, _mvol_r);
+
+  // DRIVE fader (left side, vertically centered in zone).
+  // Cap raised from 90 to 180 so the fader scales on big windows.
+  _drv_h = min(180, _ctrl_area_h - 18);
+  _drv_cx = 4 + _drv_zone_w / 2;
+  _drv_y = _ctrl_area_y + ((_ctrl_area_h - _drv_h - 14) / 2)|0;
+  _drv_track_w = 6;       // wider track
+  _drv_thumb_w = 28;      // wider thumb
+  _drv_thumb_h = 12;
+
+  // Track (wider dark groove)
+  _drv_track_x = _drv_cx - (_drv_track_w / 2)|0;
+  gfx_set(0.06, 0.06, 0.08, 1);
+  gfx_rect(_drv_track_x, _drv_y, _drv_track_w, _drv_h);
+  // Track inset bevel
+  gfx_set(0.03, 0.03, 0.05, 0.8);
+  gfx_rect(_drv_track_x, _drv_y, _drv_track_w, 1);
+  gfx_rect(_drv_track_x, _drv_y, 1, _drv_h);
+  gfx_set(0.20, 0.20, 0.22, 0.4);
+  gfx_rect(_drv_track_x, _drv_y + _drv_h - 1, _drv_track_w, 1);
+
+  // Blue center indicator line (shows current drive level in the track)
+  _drv_fill_h = (gfx_sat_drv * _drv_h)|0;
+  _drv_fill_h > 0 ? (
+    gfx_set(btn_blue_r * 0.7, btn_blue_g * 0.8, btn_blue_b * 1.0, 0.85);
+    gfx_rect(_drv_track_x + 1, _drv_y + _drv_h - _drv_fill_h, _drv_track_w - 2, _drv_fill_h);
+  );
+
+  // Tick marks (5 ticks on left side)
+  gfx_set(0.50, 0.48, 0.45, 0.5);
+  _ti = 0; loop(5,
+    _tick_y = (_drv_y + (_ti / 4.0) * _drv_h)|0;
+    gfx_line(_drv_track_x - 4, _tick_y, _drv_track_x - 1, _tick_y);
+    _ti += 1;
+  );
+
+  // Thumb position
+  _drv_thumb_y = _drv_y + (1.0 - gfx_sat_drv) * (_drv_h - _drv_thumb_h);
+  _drv_thumb_x = _drv_cx - (_drv_thumb_w / 2)|0;
+
+  // Thumb cap (metallic silver)
+  gfx_set(0.62, 0.60, 0.57, 1);
+  gfx_rect(_drv_thumb_x, _drv_thumb_y, _drv_thumb_w, _drv_thumb_h);
+  // Top highlight
+  gfx_set(0.82, 0.80, 0.77, 0.7);
+  gfx_rect(_drv_thumb_x, _drv_thumb_y, _drv_thumb_w, 1);
+  gfx_rect(_drv_thumb_x, _drv_thumb_y, 1, _drv_thumb_h);
+  // Bottom/right shadow
+  gfx_set(0.28, 0.26, 0.23, 0.7);
+  gfx_rect(_drv_thumb_x, _drv_thumb_y + _drv_thumb_h - 1, _drv_thumb_w, 1);
+  gfx_rect(_drv_thumb_x + _drv_thumb_w - 1, _drv_thumb_y, 1, _drv_thumb_h);
+  // Blue center line on thumb
+  gfx_set(btn_blue_r * 0.6, btn_blue_g * 0.7, btn_blue_b * 0.9, 0.8);
+  gfx_rect(_drv_thumb_x + 4, _drv_thumb_y + (_drv_thumb_h / 2)|0, _drv_thumb_w - 8, 2);
+
+  // Drive interaction (vertical drag, ID 270)
+  active_id == 270 ? ( LMB ? (
+    gfx_sat_drv = max(0, min(1.0, 1.0 - (my - _drv_y) / _drv_h));
+    mark_dirty();
+  ) : active_id = -1; );
+
+  active_id == -1 && mx >= _drv_thumb_x - 4 && mx <= _drv_thumb_x + _drv_thumb_w + 4 && my >= _drv_y && my <= _drv_y + _drv_h && lmb_down ? (
+    active_id = 270;
+  );
+
+  // Tooltip: zone 3 = master DRIVE fader. Hover zone uses the same
+  // hitbox as the click + scroll detectors above.
+  mx >= _drv_thumb_x - 6 && mx <= _drv_thumb_x + _drv_thumb_w + 6 && my >= _drv_y && my <= _drv_y + _drv_h ?
+    swing_tooltip_check(3, "Master DRIVE — saturation amount applied at the final stage. 0 = clean, 1 = fully saturated. Drag thumb, scroll wheel, or double-click to reset.");
+
+  // Drive scroll wheel — anywhere over the fader column adjusts the
+  // drive amount. Matches the wheel sensitivity of the LCD 0..1 knobs
+  // (delay feedback / mix etc., 0.02 per tick = 50 ticks full range).
+  // Hitbox uses the thumb width plus a 6px gutter so the user can land
+  // the scroll without aiming exactly at the moving thumb.
+  mx >= _drv_thumb_x - 6 && mx <= _drv_thumb_x + _drv_thumb_w + 6 && my >= _drv_y && my <= _drv_y + _drv_h && frame_wheel != 0 ? (
+    gfx_sat_drv = max(0, min(1.0, gfx_sat_drv + frame_wheel * 0.02));
+    mark_dirty();
+  );
+
+  // Drive label — dark on cream panel for contrast
+  gfx_setfont(1, "Arial", 10, 'b');
+  gfx_set(0.18, 0.16, 0.14, 1.0);
+  gfx_measurestr("DRIVE", tw, th);
+  gfx_x = _drv_cx - tw / 2; gfx_y = _drv_y + _drv_h + 4; gfx_drawstr("DRIVE");
+
+  // ── Master VOL jog wheel knob (centered in knob zone) ──
+  _mvol_cx = _drv_zone_w + _knob_zone_w / 2;
+  _mvol_cy = _ctrl_area_y + (_ctrl_area_h / 2)|0;
+
+  // Master vol is now logged as dB (ver 40+). Knob reads -60..+12 dB,
+  // default 0 dB = unity gain. Conversion to linear amplitude happens
+  // in Swing_ReaKit.jsfx @slider where it sets global_vol from master_db.
+  // Tooltip: zone 21 = master VOL knob. Hitbox matches the interact zone.
+  _mvol_dx = mx - _mvol_cx; _mvol_dy = my - _mvol_cy;
+  _mvol_dx*_mvol_dx + _mvol_dy*_mvol_dy <= (_mvol_r+6)*(_mvol_r+6) ?
+    swing_tooltip_check(21, "Master output volume (-60 dB silence to +12 dB). Drag, scroll, or double-click to reset to 0 dB (unity).");
+  jog_knob_draw(_mvol_cx, _mvol_cy, _mvol_r, master_db, -60, 12, km_master_vol[0],
+                0.15, 0.55, 1.0);
+
+  // Interact: drag, scroll, double-click reset to 0 dB (unity)
+  nv = jog_knob_interact(km_master_vol, _mvol_cx, _mvol_cy, _mvol_r + 6, master_db, -60, 12, 0, 0);
+  nv != master_db ? (
+    master_db = nv;
+    slider2 = master_db;
+    slider_automate(slider2);
+    // Recompute global_vol immediately so the next @sample uses the new amp
+    // (don't wait for @slider — it fires on the NEXT block boundary).
+    global_vol = master_db <= -60 ? 0 : exp(master_db * 0.11512925465);
+  );
+
+  // Label: MASTER VOL (bold) — dark on cream panel for contrast
+  gfx_setfont(1, "Arial", 10, 'b');
+  gfx_set(0.18, 0.16, 0.14, 1.0);
+  gfx_measurestr("MASTER VOL", tw, th);
+  gfx_x = _mvol_cx - tw / 2; gfx_y = _mvol_cy + _mvol_r + 10; gfx_drawstr("MASTER VOL");
+
+  // Tooltip rendering happens once at end of @gfx via swing_tooltip_draw()
+  // in Swing_ReaKit.jsfx. Hover-site swing_tooltip_check() calls above
+  // have already set the render text + zone-tracking state.
+);

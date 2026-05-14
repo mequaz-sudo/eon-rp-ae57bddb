@@ -1,0 +1,165 @@
+// rk_swing_block.jsfx-inc
+// @block helpers extracted from Swing_ReaKit.jsfx for readability.
+// (c) EON Studios — All Rights Reserved
+//
+// All functions read/write file-scope globals (state vars, gmem, etc.).
+// Loop counters and short-lived temporaries are declared `local()` so they
+// don't pollute the main file's namespace. Persistent DSP state
+// (rpt_counter, rpt_swing_phase, _last_block_time, _last_meq_*, etc.)
+// stays at file scope.
+
+@init
+
+// ─── Audio-engine gap detector ──────────────────────────────────────────
+// Normal block gap ≈ samplesblock/srate (~1–6ms). Anything >50ms means the
+// engine paused (app switch, device reset). On resume, flush filter state
+// to prevent denormals/clicks from stale coefficients.
+function swing_block_gap_flush()
+local(_now, _gap, _fi, _bq_st)
+(
+  _now = time_precise();
+  _gap = _now - _last_block_time;
+  _last_block_time = _now;
+  (_gap > 0.05 && _gap < 10) ? (
+    // Flush per-pad biquad filter state (5 filters × 16 pads, 8 state slots each)
+    _fi = 0; loop(NUM_PADS * BQ_PER_PAD,
+      _bq_st = bq_pad + _fi * BQ_STEREO_SIZE;
+      _bq_st[BQ_X1L] = 0; _bq_st[BQ_X2L] = 0; _bq_st[BQ_Y1L] = 0; _bq_st[BQ_Y2L] = 0;
+      _bq_st[BQ_X1R] = 0; _bq_st[BQ_X2R] = 0; _bq_st[BQ_Y1R] = 0; _bq_st[BQ_Y2R] = 0;
+      _fi += 1;
+    );
+    // Flush master biquad filter state (5 filters: HPF, LPF, lo, mid, hi)
+    _fi = 0; loop(5,
+      _bq_st = bq_master + _fi * BQ_STEREO_SIZE;
+      _bq_st[BQ_X1L] = 0; _bq_st[BQ_X2L] = 0; _bq_st[BQ_Y1L] = 0; _bq_st[BQ_Y2L] = 0;
+      _bq_st[BQ_X1R] = 0; _bq_st[BQ_X2R] = 0; _bq_st[BQ_Y1R] = 0; _bq_st[BQ_Y2R] = 0;
+      _fi += 1;
+    );
+    // Flush one-pole filter tracking state
+    _fi = 0; loop(NUM_PADS,
+      fx_hpf_stL[_fi] = 0; fx_hpf_stR[_fi] = 0;
+      fx_lpf_stL[_fi] = 0; fx_lpf_stR[_fi] = 0;
+      _fi += 1;
+    );
+    // Flush per-pad compressor envelopes
+    _fi = 0; loop(NUM_PADS,
+      fx_cmp_env[_fi] = 0;
+      fx_cmp_last_gr[_fi] = 0;
+      fx_cmp_last_lin[_fi] = 1.0;
+      _fi += 1;
+    );
+    // Flush limiter envelope to unity (prevents stale GR from popping)
+    gfx_lim_env = 1.0;
+    // Flush compressor envelope
+    cmp_env = 0;
+  );
+);
+
+// ─── Sample-rate change handler ─────────────────────────────────────────
+// Recompute every coefficient that depends on srate. Called per-block;
+// short-circuits when nothing changed.
+function swing_block_handle_srate_change()
+local(i)
+(
+  srate != last_srate ? (
+    i = 0; loop(NUM_PADS, recalc_pad(i); recalc_fx(i); i += 1;);
+    steal_coeff = exp(-1.0 / max(1, 0.005 * srate));
+    _pad_meter_decay = exp(-1.0 / max(1, 0.090 * srate));
+    _mst_meter_decay = exp(-1.0 / max(1, 0.450 * srate));
+    _sm_coeff = 1.0 - exp(-1.0 / max(1, 0.0045 * srate));
+    recalc_global_fx();
+    dly_recalc();
+    rvb_recalc();
+    cmp_recalc();
+    gfx_lim_rel_c = exp(-1.0 / max(1, gfx_lim_rel * 0.001 * srate));
+    last_srate = srate;
+  );
+);
+
+// ─── FX param drift watcher ─────────────────────────────────────────────
+// Lazy recalc: if any tracked FX param drifted from its last-seen value,
+// rebuild the corresponding coefficient table. Avoids calling the expensive
+// recalc functions every block.
+function swing_block_sync_fx_params()
+(
+  // Master EQ sync — recalc biquad coefficients if any parameter drifted
+  (gfx_eq_lo != _last_meq_lo || gfx_eq_mid != _last_meq_md || gfx_eq_hi != _last_meq_hi ||
+   gfx_eq_lo_freq != _last_meq_lf || gfx_eq_mid_freq != _last_meq_mf || gfx_eq_hi_freq != _last_meq_hf ||
+   gfx_hpf_freq != _last_meq_hpf || gfx_lpf_freq != _last_meq_lpf ||
+   meq_lo_bell != _last_meq_lob || meq_hi_bell != _last_meq_hib) ? (
+    recalc_global_fx();
+    _last_meq_lo = gfx_eq_lo;   _last_meq_md = gfx_eq_mid;  _last_meq_hi = gfx_eq_hi;
+    _last_meq_lf = gfx_eq_lo_freq; _last_meq_mf = gfx_eq_mid_freq; _last_meq_hf = gfx_eq_hi_freq;
+    _last_meq_hpf = gfx_hpf_freq;  _last_meq_lpf = gfx_lpf_freq;
+    _last_meq_lob = meq_lo_bell;   _last_meq_hib = meq_hi_bell;
+  );
+
+  // Delay tempo sync — only recalc when something actually changed
+  (tempo != _last_dly_tempo || dly_div != _last_dly_div ||
+   dly_hpf_hz != _last_dly_hpf || dly_lpf_hz != _last_dly_lpf ||
+   dly_ping != _last_dly_ping) ? (
+    dly_recalc();
+    _last_dly_tempo = tempo;
+    _last_dly_div   = dly_div;
+    _last_dly_hpf   = dly_hpf_hz;
+    _last_dly_lpf   = dly_lpf_hz;
+    _last_dly_ping  = dly_ping;
+  );
+);
+
+// ─── Note repeat ────────────────────────────────────────────────────────
+// Tempo-synced re-trigger of held pads, with swing. Global repeat
+// (repeat_div) overrides per-pad repeats (p_rpt_div[]). Persistent state
+// lives in rpt_counter / rpt_swing_phase / p_rpt_ctr[] / p_rpt_swph[].
+function swing_block_process_note_repeat()
+local(rpt_interval, rpt_threshold, _rpt_iters, i, blocked, _pp_interval, _pp_thr)
+(
+  // Global repeat overrides per-pad repeats
+  repeat_div > 0 ? (
+    repeat_div = max(0, min(15, repeat_div|0));
+    rpt_interval = max(1, get_rpt_interval(repeat_div));
+    rpt_threshold = rpt_interval;
+    rpt_swing_phase ? rpt_threshold += swing_amt * rpt_interval * 0.5;
+    rpt_counter += samplesblock;
+    _rpt_iters = 0;
+    while(rpt_counter >= rpt_threshold && _rpt_iters < 32) (
+      _rpt_iters += 1;
+      rpt_counter -= rpt_interval;
+      rpt_swing_phase = !rpt_swing_phase;
+      i = 0; loop(NUM_PADS,
+        p_held[i] && !_blk_trig[i] ? (  // skip pads that JUST triggered this block
+          blocked = p_mute[i] || (any_solo && !p_solo[i]) || !pad_has_audio(i) || s_skip[i];
+          !blocked ? launch_voices_for_pad(i, p_held_vel[i], 4);
+        );
+        i += 1;
+      );
+    );
+    _rpt_iters >= 32 ? rpt_counter = rpt_threshold - 1;
+  );
+
+  // Per-pad note repeat (only when global repeat is OFF)
+  repeat_div == 0 ? (
+    i = 0; loop(NUM_PADS,
+      p_rpt_div[i] > 0 && p_held[i] && !_blk_trig[i] ? (  // skip pads just triggered
+        p_rpt_div[i] = max(0, min(15, p_rpt_div[i]|0));
+        _pp_interval = max(1, get_rpt_interval(p_rpt_div[i]));
+        _pp_thr = _pp_interval;
+        p_rpt_swph[i] ? _pp_thr += swing_amt * _pp_interval * 0.5;
+        p_rpt_ctr[i] += samplesblock;
+        _rpt_iters = 0;
+        while(p_rpt_ctr[i] >= _pp_thr && _rpt_iters < 32) (
+          _rpt_iters += 1;
+          p_rpt_ctr[i] -= _pp_interval;
+          p_rpt_swph[i] = !p_rpt_swph[i];
+          blocked = p_mute[i] || (any_solo && !p_solo[i]) || !pad_has_audio(i) || s_skip[i];
+          !blocked ? launch_voices_for_pad(i, p_held_vel[i], 4);
+        );
+        _rpt_iters >= 32 ? p_rpt_ctr[i] = _pp_thr - 1;
+      ) : (
+        // Reset counter when pad not held or repeat off
+        p_rpt_ctr[i] = 0; p_rpt_swph[i] = 0;
+      );
+      i += 1;
+    );
+  );
+);

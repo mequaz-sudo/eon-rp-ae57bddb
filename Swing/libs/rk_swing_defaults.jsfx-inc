@@ -1,0 +1,130 @@
+// rk_swing_defaults.jsfx-inc
+// Factory defaults for serialized variables.
+// (c) EON Studios — All Rights Reserved
+//
+// CONTRACT: These functions only set defaults. They MUST only be called from
+// @init (or, for the FX function, from the New Kit handler). With
+// ext_noinit=1.0 in Swing_ReaKit.jsfx, @init runs exactly once per instance —
+// before @serialize on project load. Fresh instances land here; project loads
+// overwrite via @serialize. Old presets that predate a given var get
+// backfilled by `is_read && ser_ver < N` clauses in @serialize.
+//
+// AUDIT NOTE: The audit-jsfx serialize_safety check flags any serialized var
+// init in @init. That rule assumes ext_noinit=0 and is mitigated here by the
+// ext_noinit=1.0 invariant. Centralising defaults in this file makes the
+// contract auditable in one place.
+
+@init
+
+// ─── Mode flags ──────────────────────────────────────────────────────────
+// These survive a "New Kit" action by design (user keeps their preferred
+// output routing, swing, palette, note map, etc.).
+function swing_apply_defaults_modes() (
+  multi_out      = 0;    // 0 = stereo, 1 = multi-output (8 buses)
+  repeat_div     = 0;    // 0=OFF, 1=1/4, 2=1/8, 3=1/8T, 4=1/16, 5=1/16T, 6=1/32
+  vel_curve      = 0;    // 0=linear, 1=soft, 2=hard, 3=fixed
+  swing_amt      = 0.0;  // 0.0–0.99 swing for note repeat
+  color_palette  = 0;    // current palette index (0=none/custom)
+  note_map       = 0;    // 0=chromatic, 1=white_keys, 2=gm_drums, 3=black_keys
+  oneshot_global = 1;    // 1 = global one-shot ON (drums play through), 0 = gate mode
+);
+
+// ─── FX chain ────────────────────────────────────────────────────────────
+// Reset by @init, New Kit (CMD 4), and the in-JSFX NEW button (deferred undo).
+// Runtime-derived companions (gfx_lim_rel_c, gfx_lim_env, gfx_lim_gr) live in
+// the New Kit reset / @init — they depend on srate or are pure DSP state.
+function swing_apply_defaults_fx() (
+  // Master HPF / LPF / saturation
+  gfx_hpf_freq = 20;       // Hz (20 = off)
+  gfx_lpf_freq = 20000;    // Hz (20000 = off)
+  gfx_sat_drv  = 0;        // 0–1
+
+  // Master EQ
+  gfx_eq_lo  = 0;
+  gfx_eq_mid = 0;
+  gfx_eq_hi  = 0;
+  gfx_eq_lo_freq  = 200;
+  gfx_eq_mid_freq = 1000;
+  gfx_eq_hi_freq  = 5000;
+  meq_lo_bell = 0;         // 0=shelf, 1=bell
+  meq_hi_bell = 0;
+  meq_bypass  = 0;         // 1 = master EQ bypassed
+
+  // Master limiter (params only — runtime state separate)
+  gfx_lim_on  = 1;
+  gfx_lim_thr = 1.0;       // linear (1.0 = 0 dBFS)
+  gfx_lim_rel = 100;       // ms
+
+  // Delay
+  dly_div    = 2;          // 1/8 default
+  dly_fb     = 0.35;
+  dly_mix    = 0.5;
+  dly_hpf_hz = 80;
+  dly_lpf_hz = 8000;
+  dly_ping   = 1;
+
+  // Reverb
+  rvb_size     = 0.5;
+  rvb_damp     = 0.5;
+  rvb_mix      = 0.4;
+  rvb_width    = 1.0;
+  rvb_predelay = 0;
+  rvb_hpf      = 0;
+
+  // Compressor
+  cmp_thresh  = 0;         // 0 = off
+  cmp_ratio   = 4;
+  cmp_attack  = 10;
+  cmp_release = 100;
+  cmp_knee    = 6;
+  cmp_makeup  = 0;
+  cmp_mix     = 1.0;
+  cmp_bypass  = 1;         // off by default
+);
+
+// ─── New-Kit full reset ──────────────────────────────────────────────────
+// Wipes pads + name + FX chain. Used by both the external "New Kit" Lua
+// action (CMD 4 path in @gfx) and the in-JSFX NEW button (via deferred
+// undo, _undo_pending == 6). Mode flags (swing, oneshot, output routing,
+// note map, palette) survive by design — they're user preferences, not
+// kit state, so we don't call swing_apply_defaults_modes() here.
+function swing_new_kit_full_reset()
+local(_ci, _xf_vi)
+(
+  // Anti-pop: kill voices + arm a 20ms crossfade before the audio buffers
+  // get cleared, so any in-flight sample tail fades into silence instead
+  // of cutting to a click. Gate on _xf_prev being non-silent so an idle
+  // "New Kit" → immediate play doesn't ramp-attenuate the first hit.
+  _xf_vi = 0; loop(MAX_VOICES + 1,
+    v_pos[_xf_vi] = -1; v_env[_xf_vi] = 0; v_stage[_xf_vi] = 0;
+    _xf_vi += 1;
+  );
+  abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+    _xf_pos = 0; _xf_len = max(1, (0.020 * srate)|0); _xf_active = 1;
+  );
+
+  _ci = 0; loop(NUM_PADS,
+    clear_pad(_ci);
+    // clear_pad preserves p_adsr_user across drag-ins (so re-loading a
+    // sample on a tuned pad keeps the user's ADSR). New Kit is the
+    // explicit "wipe everything" gesture, so we drop the flag too.
+    p_adsr_user[_ci] = 0;
+    recalc_pad(_ci);
+    recalc_fx(_ci);   // rebuild biquad/bitcrush/drive coefs so the old
+                      // kit's filter curves don't persist past New Kit
+    s_dirty[_ci] = 1;
+    _ci += 1;
+  );
+  strcpy(#kit_name, "");
+  kit_name_gmem_dirty = 1; audiolen_gmem_dirty = 1;
+  pad_colors_gmem_dirty = 1; pad_names_gmem_dirty = 1;
+  col_dirty = 1;
+
+  // Reset global FX chain to factory defaults
+  swing_apply_defaults_fx();
+  gfx_lim_rel_c = exp(-1.0 / max(1, gfx_lim_rel * 0.001 * srate));
+  gfx_lim_env = 1.0; gfx_lim_gr = 1.0;
+  recalc_global_fx(); dly_recalc(); rvb_recalc(); cmp_recalc();
+  mark_dirty();
+  sync_note_names();
+);

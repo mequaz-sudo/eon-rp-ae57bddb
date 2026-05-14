@@ -1,0 +1,593 @@
+// rk_swing_ui_grid_overlay.jsfx-inc
+// Swing overlay: panel frame, layer tabs, drop/close logic + orchestrator
+// Sub-functions for swing_grid_draw_overlay() — zero behavioral change
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function _ov_draw_header_and_colorpicker() (
+    // Panel background
+    gfx_set(0.15, 0.16, 0.19, 1); gfx_rect(op_x, op_y, op_w, op_h);
+    // Accent border
+    gfx_set(pr * 0.6, pgg * 0.6, pb * 0.6, 1);
+    gfx_rect(op_x, op_y, op_w, op_h, 0);
+    gfx_rect(op_x+1, op_y+1, op_w-2, op_h-2, 0);
+
+    // Header bar
+    gfx_set(pr * 0.35, pgg * 0.35, pb * 0.35, 1);
+    gfx_rect(op_x, op_y, op_w, 26);
+    gfx_setfont(1, "Arial", 11, 'b');
+    gfx_set(1, 1, 1, 0.85);
+    sprintf(#oh, "PAD %d", oi + 1);
+    gfx_x = op_x + 10; gfx_y = op_y + 7; gfx_drawstr(#oh);
+    nm = get_name_slot(oi);
+    strlen(nm) > 0 ? (
+      gfx_set(pr + (1-pr)*0.5, pgg + (1-pgg)*0.5, pb + (1-pb)*0.5, 1);
+      gfx_x = op_x + 52; gfx_y = op_y + 7; gfx_drawstr("—");
+      gfx_x = op_x + 62; gfx_y = op_y + 7; gfx_drawstr(nm);
+    );
+
+    // ── Color picker: B/W + 16 hue swatches + fine hue slider ─────────
+    // 18 cells (black, 16 hues, white) plus a rainbow slider for fine
+    // control.  Uses theme-effective S/L so swatches match pad faces.
+    _cp_y = op_y + 28;
+    _cp_h = 16;
+    _sw_count = 18;      // 0=black, 1-16=hues, 17=white
+    _sw_margin = 6;
+    _slider_w = 100;
+    _slider_gap = 6;
+    _sw_total = op_w - _sw_margin * 2 - _slider_w - _slider_gap;
+    _sw_w = _sw_total / _sw_count;
+    _sw_x0 = op_x + _sw_margin;
+
+    // Theme-effective S/L (falls back to defaults if not yet published)
+    _cp_eff_s = gmem[GS_COL_EFFECTIVE_S];
+    _cp_eff_l = gmem[GS_COL_EFFECTIVE_L];
+    (_cp_eff_s == 0 && _cp_eff_l == 0) ? ( _cp_eff_s = 0.75; _cp_eff_l = 0.55; );
+
+    // Swatch row background band
+    gfx_set(0.08, 0.09, 0.11, 1);
+    gfx_rect(op_x, _cp_y - 2, op_w, _cp_h + 4);
+
+    // Dark backing behind swatches
+    gfx_set(0.04, 0.04, 0.05, 1);
+    gfx_rect(_sw_x0, _cp_y - 1, _sw_total, _cp_h + 2);
+
+    // Determine selected swatch index
+    p_color[oi] <= -1.5 ? _best_si = 0 :     // black
+    p_color[oi] < 0     ? _best_si = 17 :    // white
+    (
+      _best_si = (p_color[oi] * 16 + 0.5) | 0;
+      _best_si >= 16 ? _best_si = 0;
+      _best_si += 1;   // hue swatches at indices 1-16
+    );
+
+    _si = 0;
+    loop(_sw_count,
+      _sw_x = _sw_x0 + (_si * _sw_w) | 0;
+      _sw_x_next = _sw_x0 + ((_si + 1) * _sw_w) | 0;
+      _sw_rw = _sw_x_next - _sw_x;
+
+      // Swatch color: black / hue / white
+      _si == 0 ? (
+        gfx_set(0.20, 0.20, 0.22, 1);
+      ) : _si == 17 ? (
+        gfx_set(0.82, 0.82, 0.85, 1);
+      ) : (
+        hsl_to_rgb((_si - 1) / 16, _cp_eff_s, _cp_eff_l);
+        gfx_set(_hsl_r, _hsl_g, _hsl_b, 1);
+      );
+      gfx_rect(_sw_x + 1, _cp_y, _sw_rw - 2, _cp_h);
+
+      // Selected: white double border
+      _si == _best_si ? (
+        gfx_set(1, 1, 1, 0.95);
+        gfx_rect(_sw_x, _cp_y - 1, _sw_rw, _cp_h + 2, 0);
+        gfx_rect(_sw_x + 1, _cp_y, _sw_rw - 2, _cp_h, 0);
+      );
+
+      // Hover glow
+      !LMB && mx >= _sw_x && mx < _sw_x_next &&
+        my >= _cp_y - 2 && my <= _cp_y + _cp_h + 2 ? (
+        gfx_set(1, 1, 1, 0.25);
+        gfx_rect(_sw_x + 1, _cp_y, _sw_rw - 2, _cp_h);
+      );
+
+      _si += 1;
+    );
+
+    // Swatch click
+    _in_sw = mx >= _sw_x0 && mx <= _sw_x0 + _sw_total &&
+             my >= _cp_y - 2 && my <= _cp_y + _cp_h + 2;
+    _in_sw && lmb_down ? (
+      _click_si = ((mx - _sw_x0) / _sw_w) | 0;
+      _click_si = max(0, min(_sw_count - 1, _click_si));
+      _click_si == 0 ? (
+        p_color[oi] = -2.0;
+      ) : _click_si == 17 ? (
+        p_color[oi] = -1.0;
+      ) : (
+        p_color[oi] = (_click_si - 1) / 16;
+      );
+      col_auto_mode_id = 0;
+      mark_dirty_pad(oi);
+      col_dirty = 1;
+    );
+
+    // Mouse wheel on swatches → step through presets
+    _in_sw && frame_wheel != 0 ? (
+      frame_wheel > 0 ? _cur_si = _best_si + 1 : _cur_si = _best_si - 1;
+      _cur_si < 0 ? _cur_si = _sw_count - 1;
+      _cur_si >= _sw_count ? _cur_si = 0;
+      _cur_si == 0 ? (
+        p_color[oi] = -2.0;
+      ) : _cur_si == 17 ? (
+        p_color[oi] = -1.0;
+      ) : (
+        p_color[oi] = (_cur_si - 1) / 16;
+      );
+      col_auto_mode_id = 0;
+      mark_dirty_pad(oi);
+      col_dirty = 1;
+    );
+
+    // ── Hue slider (fine-tune, right side) ──
+    _hs_x = _sw_x0 + _sw_total + _slider_gap;
+    _hs_w = _slider_w;
+
+    // Rainbow strip
+    _hue_i = 0;
+    loop(_hs_w,
+      hsl_to_rgb(_hue_i / _hs_w, _cp_eff_s, _cp_eff_l);
+      gfx_set(_hsl_r, _hsl_g, _hsl_b, 1);
+      gfx_rect(_hs_x + _hue_i, _cp_y, 1, _cp_h);
+      _hue_i += 1;
+    );
+    // Current hue marker (only for chromatic colors)
+    p_color[oi] >= 0 ? (
+      _hue_mark_x = _hs_x + (p_color[oi] * _hs_w) | 0;
+      gfx_set(1, 1, 1, 0.9);
+      gfx_rect(_hue_mark_x - 1, _cp_y - 1, 3, _cp_h + 2);
+      gfx_set(0, 0, 0, 0.5);
+      gfx_rect(_hue_mark_x - 2, _cp_y - 1, 1, _cp_h + 2);
+      gfx_rect(_hue_mark_x + 2, _cp_y - 1, 1, _cp_h + 2);
+    );
+    // Slider border
+    gfx_set(0.25, 0.26, 0.30, 0.6);
+    gfx_rect(_hs_x - 1, _cp_y - 1, _hs_w + 2, _cp_h + 2, 0);
+
+    // Slider drag (ID 250)
+    _in_hs = mx >= _hs_x - 2 && mx <= _hs_x + _hs_w + 2 &&
+             my >= _cp_y - 2 && my <= _cp_y + _cp_h + 2;
+    active_id == 250 ? ( LMB ? (
+      p_color[oi] = max(0.0, min(0.999, (mx - _hs_x) / _hs_w));
+      col_auto_mode_id = 0;
+      mark_dirty_pad(oi);
+      col_dirty = 1;
+    ) : active_id = -1; );
+    active_id == -1 && _in_hs && lmb_down ? (
+      active_id = 250;
+      p_color[oi] = max(0.0, min(0.999, (mx - _hs_x) / _hs_w));
+      col_auto_mode_id = 0;
+      mark_dirty_pad(oi);
+      col_dirty = 1;
+    );
+    // Wheel on slider → fine hue (1/64 step)
+    _in_hs && frame_wheel != 0 ? (
+      p_color[oi] < 0 ? p_color[oi] = 0;
+      p_color[oi] += frame_wheel * 0.015625;
+      p_color[oi] < 0 ? p_color[oi] += 1.0;
+      p_color[oi] >= 1 ? p_color[oi] -= 1.0;
+      col_auto_mode_id = 0;
+      mark_dirty_pad(oi);
+      col_dirty = 1;
+    );
+
+    // Close button [x]
+    cl_x = op_x + op_w - 22; cl_y = op_y + 4;
+    gfx_set(0.55, 0.20, 0.20, 1);
+    gfx_rect(cl_x, cl_y, 18, 18);
+    gfx_set(1, 1, 1, 0.85);
+    gfx_setfont(1, "Arial", 11, 'b');
+    gfx_x = cl_x + 3; gfx_y = cl_y + 2; gfx_drawstr("x");
+);
+
+function _ov_draw_layers_and_mode() (
+    // ── Layer tabs + mode selector ─────────────────────────
+      tab_y = op_y + 48;
+      tab_x = op_x + 10;
+      tab_w = 30;
+      tab_h = 20;
+      // Layer tabs (L1, L2, L3, L4)
+      li = 0; loop(MAX_LAYERS,
+        tab_xi = tab_x + li * tab_w;
+        _lidx = oi * MAX_LAYERS + li;
+        // Highlight if has audio
+        p_layer_cnt[oi] > 0 ? (
+          has_layer_audio = l_len[_lidx] > 0;
+        ) : (
+          has_layer_audio = (li == 0 && s_len[oi] > 0);
+        );
+        // Active tab highlight — bright orange when selected, medium when has audio, dim when empty
+        is_active = (li == overlay_layer);
+        is_active ? gfx_set(0.90, 0.50, 0.12, 1) :
+          (has_layer_audio ? gfx_set(0.40, 0.42, 0.48, 1) : gfx_set(0.18, 0.19, 0.22, 1));
+        gfx_rect(tab_xi, tab_y, tab_w - 2, tab_h);
+        // Border
+        is_active ? gfx_set(1.0, 0.65, 0.25, 0.8) : gfx_set(0.45, 0.47, 0.50, 0.6);
+        gfx_rect(tab_xi, tab_y, tab_w - 2, tab_h, 0);
+        // Tab label — larger font for readability
+        gfx_setfont(1, "Arial", 10, 'b');
+        is_active ? gfx_set(1, 1, 1, 1.0) :
+          (has_layer_audio ? gfx_set(0.90, 0.92, 0.95, 0.90) : gfx_set(0.55, 0.57, 0.60, 0.65));
+        sprintf(#_tab_lbl, "L%d", li + 1);
+        gfx_measurestr(#_tab_lbl, tw, th);
+        gfx_x = tab_xi + ((tab_w - 2 - tw) / 2); gfx_y = tab_y + ((tab_h - th) / 2); gfx_drawstr(#_tab_lbl);
+        // Click handling
+        _in_tab = mx >= tab_xi && mx <= tab_xi + tab_w - 2 && my >= tab_y && my <= tab_y + tab_h;
+        _in_tab && lmb_down ? (
+          overlay_layer = li;
+        );
+        // Right-click layer tab → delete menu
+        _in_tab && rmb_down ? (
+          _has_audio = l_len[oi * MAX_LAYERS + li] > 0;
+          _has_audio ? (
+            sprintf(#_tab_menu, "Clear Layer %d", li + 1);
+            resp = gfx_showmenu(#_tab_menu);
+            resp == 1 ? (
+              gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+                // UNDO_DESC=7 → "Swing: Clear Layer" in the bridge
+                // (was =2 "Clear Pad" — wrong description for the
+                // clear-layer action driven by _undo_pending=3).
+                gmem[KIT_GMEM_UNDO_DESC] = 7; gmem[KIT_GMEM_CMD] = 46;
+                _undo_pending = 3; _undo_pad = oi; _undo_layer = li;
+              ) : (
+                clear_layer(oi, li);
+                // Clearing a layer changes the effective RR sequence;
+                // reset cursor so the next hit starts at position 1.
+                p_rr_idx[oi] = 0;
+                s_dirty[oi] = 1; mark_dirty_pad(oi);
+              );
+            );
+          );
+        );
+        li += 1;
+      );
+      // Mode selector dropdown (right of tabs)
+      mode_x = tab_x + MAX_LAYERS * tab_w + 10;
+      gfx_set(0.22, 0.24, 0.30, 1);
+      gfx_rect(mode_x, tab_y, 80, tab_h);
+      gfx_set(0.50, 0.52, 0.56, 0.7);
+      gfx_rect(mode_x, tab_y, 80, tab_h, 0);
+      gfx_setfont(1, "Arial", 10, 'b');
+      gfx_set(1, 1, 1, 0.90);
+      p_layer_mode[oi] == 1 ? strcpy(#_mode_str, "Vel-Split") :
+        (p_layer_mode[oi] == 2 ? strcpy(#_mode_str, "RR") :
+        strcpy(#_mode_str, "Sum"));
+      gfx_x = mode_x + 6; gfx_y = tab_y + 6; gfx_drawstr(#_mode_str);
+      mx >= mode_x && mx <= mode_x + 80 && my >= tab_y && my <= tab_y + tab_h && lmb_down ? (
+        resp = gfx_showmenu("Vel-Split|Round-Robin|Sum");
+        resp > 0 ? (
+          p_layer_mode[oi] = resp; // 1=Vel-Split, 2=RR, 3=Sum
+          // Mode change resets the round-robin cursor: when the user
+          // switches into RR (or out of it and back), the next hit must
+          // start from layer 1, not wherever the cursor was sitting from
+          // a previous RR pass. Harmless when mode != RR (cursor is
+          // unread in Sum/Vel-Split).
+          p_rr_idx[oi] = 0;
+          // Auto-promote legacy single sample → layer 0 when switching modes
+          // Audio data is already at layer 0 offset (SLOT_SIZE + 0*LAYER_SIZE), just copy metadata
+          p_layer_cnt[oi] == 0 && s_len[oi] > 0 ? (
+            _lidx = oi * MAX_LAYERS;
+            l_len[_lidx]       = min(s_len[oi], LAYER_SIZE);
+            l_start[_lidx]     = s_start[oi];
+            l_end[_lidx]       = s_end[oi];
+            l_sr[_lidx]        = s_sr[oi];
+            l_norm[_lidx]      = s_norm[oi];
+            l_norm_gain[_lidx] = s_norm_gain[oi];
+            p_layer_cnt[oi]    = 1;
+          );
+          // Auto-assign even vel-split ranges when switching to Vel-Split
+          // (only if all layers still have default 0-1 ranges)
+          resp == 1 && p_layer_cnt[oi] > 1 ? (
+            _all_default = 1; _ncnt = p_layer_cnt[oi];
+            li = 0; loop(_ncnt,
+              _base = oi * MAX_LAYERS + li;
+              (l_vel_lo[_base] > 0.001 || l_vel_hi[_base] < 0.999) ? _all_default = 0;
+              li += 1;
+            );
+            _all_default ? (
+              li = 0; loop(_ncnt,
+                _base = oi * MAX_LAYERS + li;
+                l_vel_lo[_base] = li / _ncnt;
+                l_vel_hi[_base] = (li + 1) / _ncnt;
+                li += 1;
+              );
+            );
+          );
+          mark_dirty_pad(oi);
+        );
+      );
+
+      // Per-layer mode controls (below mode selector, with breathing room)
+      ctrl_y = tab_y + tab_h + 10;
+      _cur_lidx = oi * MAX_LAYERS + overlay_layer;
+      gfx_setfont(1, "Arial", 11, 0);
+
+      p_layer_mode[oi] == 1 ? (
+        // Vel-Split: horizontal range bar with draggable Lo/Hi handles
+        _vb_x = tab_x; _vb_w = op_w - 30; _vb_h = 24;
+        _vlo_n = l_vel_lo[_cur_lidx]; _vhi_n = l_vel_hi[_cur_lidx];
+        _vlo_px = _vb_x + (_vlo_n * _vb_w)|0;
+        _vhi_px = _vb_x + (_vhi_n * _vb_w)|0;
+        // Track background (full 0-127 range)
+        gfx_set(0.12, 0.12, 0.15, 1); gfx_rect(_vb_x, ctrl_y, _vb_w, _vb_h);
+        // Active range fill
+        gfx_set(0.30, 0.55, 0.75, 0.6);
+        gfx_rect(_vlo_px, ctrl_y, max(1, _vhi_px - _vlo_px), _vb_h);
+        // Lo handle
+        gfx_set(0.85, 0.55, 0.20, 1); gfx_rect(_vlo_px - 2, ctrl_y, 5, _vb_h);
+        // Hi handle
+        gfx_set(0.30, 0.70, 0.85, 1); gfx_rect(_vhi_px - 2, ctrl_y, 5, _vb_h);
+        // Lo drag
+        _near_lo = abs(mx - _vlo_px) < 8 && my >= ctrl_y - 2 && my <= ctrl_y + _vb_h + 2;
+        _near_hi = abs(mx - _vhi_px) < 8 && my >= ctrl_y - 2 && my <= ctrl_y + _vb_h + 2;
+        active_id == 490 ? ( LMB ? (
+          l_vel_lo[_cur_lidx] = max(0, min(l_vel_hi[_cur_lidx] - 1/127,
+            (mx - _vb_x) / _vb_w)); mark_dirty_pad(oi);
+        ) : active_id = -1; );
+        active_id == 491 ? ( LMB ? (
+          l_vel_hi[_cur_lidx] = max(l_vel_lo[_cur_lidx] + 1/127, min(1.0,
+            (mx - _vb_x) / _vb_w)); mark_dirty_pad(oi);
+        ) : active_id = -1; );
+        lmb_down && active_id < 0 ? (
+          _near_lo && (!_near_hi || abs(mx - _vlo_px) <= abs(mx - _vhi_px)) ? active_id = 490 :
+          _near_hi ? active_id = 491;
+        );
+        // Labels
+        gfx_setfont(1, "Arial", 11, 'b');
+        gfx_set(1, 1, 1, 0.9);
+        sprintf(#_vr, "%d", (_vlo_n * 127)|0);
+        gfx_measurestr(#_vr, tw, th);
+        gfx_x = _vlo_px - tw - 4; gfx_y = ctrl_y + (_vb_h - th)/2;
+        _vlo_px - tw - 4 >= _vb_x ? gfx_drawstr(#_vr);
+        sprintf(#_vr, "%d", (_vhi_n * 127)|0);
+        gfx_measurestr(#_vr, tw, th);
+        gfx_x = _vhi_px + 5; gfx_y = ctrl_y + (_vb_h - th)/2;
+        _vhi_px + 5 + tw <= _vb_x + _vb_w ? gfx_drawstr(#_vr);
+      );
+
+      p_layer_mode[oi] == 2 ? (
+        // Round-Robin: show order for current layer
+        _rr_ord = (l_rr_order[_cur_lidx])|0;
+        gfx_setfont(1, "Arial", 11, 'b');
+        gfx_set(0.8, 0.8, 0.8, 0.9);
+        sprintf(#_rr, "Order: %d", _rr_ord + 1);
+        gfx_x = tab_x; gfx_y = ctrl_y + 2; gfx_drawstr(#_rr);
+        // Order -
+        _btn_x = tab_x + 80;
+        gfx_set(0.30, 0.32, 0.36, 1); gfx_rect(_btn_x, ctrl_y, 26, 22);
+        gfx_set(0.45, 0.47, 0.50, 0.7); gfx_rect(_btn_x, ctrl_y, 26, 22, 0);
+        gfx_set(1,1,1,0.9); gfx_x = _btn_x + 9; gfx_y = ctrl_y + 3; gfx_drawstr("-");
+        mx >= _btn_x && mx <= _btn_x + 26 && my >= ctrl_y && my <= ctrl_y + 22 && lmb_down ? (
+          l_rr_order[_cur_lidx] = max(0, _rr_ord - 1);
+          // Reorder resets the cursor: the user reordered the sequence,
+          // so the next hit must start from position 1 of the new order.
+          p_rr_idx[oi] = 0;
+          mark_dirty_pad(oi);
+        );
+        // Order +
+        _btn_x += 30;
+        gfx_set(0.30, 0.32, 0.36, 1); gfx_rect(_btn_x, ctrl_y, 26, 22);
+        gfx_set(0.45, 0.47, 0.50, 0.7); gfx_rect(_btn_x, ctrl_y, 26, 22, 0);
+        gfx_set(1,1,1,0.9); gfx_x = _btn_x + 8; gfx_y = ctrl_y + 3; gfx_drawstr("+");
+        mx >= _btn_x && mx <= _btn_x + 26 && my >= ctrl_y && my <= ctrl_y + 22 && lmb_down ? (
+          l_rr_order[_cur_lidx] = min(p_layer_cnt[oi] - 1, _rr_ord + 1);
+          p_rr_idx[oi] = 0;
+          mark_dirty_pad(oi);
+        );
+      );
+
+      p_layer_mode[oi] == 3 ? (
+        // Sum: tight/loose slider
+        gfx_setfont(1, "Arial", 11, 'b');
+        gfx_set(0.8, 0.8, 0.8, 0.9);
+        gfx_x = tab_x; gfx_y = ctrl_y + 3; gfx_drawstr("TIGHT");
+        // Slider bar
+        _sl_x = tab_x + 52; _sl_w = 120; _sl_h = 22;
+        gfx_set(0.20, 0.22, 0.26, 1); gfx_rect(_sl_x, ctrl_y, _sl_w, _sl_h);
+        _sl_fill = (p_sum_tight[oi] * _sl_w)|0;
+        gfx_set(0.50, 0.35, 0.75, 0.7); gfx_rect(_sl_x, ctrl_y, _sl_fill, _sl_h);
+        // Thumb
+        _sl_fill > 0 ? (
+          gfx_set(0.70, 0.50, 1.0, 1.0);
+          gfx_rect(_sl_x + _sl_fill - 1, ctrl_y, 3, _sl_h);
+        );
+        // "LOOSE" label on right
+        gfx_set(0.8, 0.8, 0.8, 0.9);
+        gfx_x = _sl_x + _sl_w + 6; gfx_y = ctrl_y + 3; gfx_drawstr("LOOSE");
+        // Interaction: drag
+        _in_tl = mx >= _sl_x && mx <= _sl_x + _sl_w && my >= ctrl_y && my <= ctrl_y + _sl_h;
+        active_id == 295 ? ( LMB ? (
+          p_sum_tight[oi] = max(0, min(1.0, (mx - _sl_x) / _sl_w));
+          mark_dirty_pad(oi);
+        ) : active_id = -1; );
+        // Double-click reset to 0 (tight) — must check BEFORE single-click
+        active_id == -1 && lmb_down && _in_tl ? (
+          _now = time_precise();
+          _mix_dbl_id == 295 && (_now - _mix_dbl_time) < DBL_CLICK_T ? (
+            p_sum_tight[oi] = 0; mark_dirty_pad(oi); _mix_dbl_id = -1;
+          ) : (
+            _mix_dbl_time = _now; _mix_dbl_id = 295;
+            active_id = 295;
+            p_sum_tight[oi] = max(0, min(1.0, (mx - _sl_x) / _sl_w));
+            mark_dirty_pad(oi);
+          );
+        );
+        // Scroll wheel
+        _in_tl && frame_wheel != 0 ? (
+          p_sum_tight[oi] = max(0, min(1.0, p_sum_tight[oi] + frame_wheel * 0.05));
+          mark_dirty_pad(oi);
+        );
+
+        // ── Per-layer VOL slider (for current layer tab) ──
+        _vl_lidx = oi * MAX_LAYERS + overlay_layer;
+        _vl_lbl_x = _sl_x + _sl_w + 50;
+        _vl_x = _vl_lbl_x + 34; _vl_w = 90; _vl_h = 22;
+        // "VOL" label — bold, bright
+        gfx_setfont(1, "Arial", 12, 'b');
+        gfx_set(1.0, 1.0, 1.0, 0.95);
+        gfx_x = _vl_lbl_x; gfx_y = ctrl_y + 3; gfx_drawstr("VOL");
+        // Slider background
+        gfx_set(0.20, 0.22, 0.26, 1); gfx_rect(_vl_x, ctrl_y, _vl_w, _vl_h);
+        // Fill (0–2.0 range, 1.0 = center = unity)
+        _vl_norm = l_gain[_vl_lidx] / 2.0;
+        _vl_fill = (_vl_norm * _vl_w)|0;
+        gfx_set(0.35, 0.55, 0.75, 0.7); gfx_rect(_vl_x, ctrl_y, _vl_fill, _vl_h);
+        // Unity marker at center
+        gfx_set(0.6, 0.6, 0.6, 0.4);
+        gfx_line(_vl_x + (_vl_w / 2)|0, ctrl_y + 2, _vl_x + (_vl_w / 2)|0, ctrl_y + _vl_h - 2);
+        // Thumb
+        _vl_fill > 0 ? (
+          gfx_set(0.50, 0.75, 1.0, 1.0);
+          gfx_rect(_vl_x + _vl_fill - 1, ctrl_y, 3, _vl_h);
+        );
+        // dB readout inside slider bar (centered)
+        gfx_setfont(1, "Arial", 11, 'b');
+        l_gain[_vl_lidx] < 0.001 ? (
+          gfx_set(1.0, 1.0, 1.0, 0.7);
+          sprintf(#_vldb, "-inf dB");
+        ) : (
+          _vl_db = 20.0 * log10(max(0.001, l_gain[_vl_lidx]));
+          gfx_set(1.0, 1.0, 1.0, 0.85);
+          sprintf(#_vldb, "%+.1f dB", _vl_db);
+        );
+        gfx_measurestr(#_vldb, _vldb_w, _vldb_h);
+        gfx_x = _vl_x + (_vl_w - _vldb_w) / 2; gfx_y = ctrl_y + 3;
+        gfx_drawstr(#_vldb);
+        // Interaction: drag
+        _in_vl = mx >= _vl_x && mx <= _vl_x + _vl_w && my >= ctrl_y && my <= ctrl_y + _vl_h;
+        active_id == 296 ? ( LMB ? (
+          l_gain[_vl_lidx] = max(0, min(2.0, ((mx - _vl_x) / _vl_w) * 2.0));
+          s_dirty[oi] = 1; mark_dirty_pad(oi);
+        ) : active_id = -1; );
+        // Double-click reset to 1.0 (unity) — must check BEFORE single-click
+        active_id == -1 && lmb_down && _in_vl ? (
+          _now = time_precise();
+          _mix_dbl_id == 296 && (_now - _mix_dbl_time) < DBL_CLICK_T ? (
+            l_gain[_vl_lidx] = 1.0; s_dirty[oi] = 1; mark_dirty_pad(oi); _mix_dbl_id = -1;
+          ) : (
+            _mix_dbl_time = _now; _mix_dbl_id = 296;
+            active_id = 296;
+            l_gain[_vl_lidx] = max(0, min(2.0, ((mx - _vl_x) / _vl_w) * 2.0));
+            s_dirty[oi] = 1; mark_dirty_pad(oi);
+          );
+        );
+        // Scroll wheel
+        _in_vl && frame_wheel != 0 ? (
+          l_gain[_vl_lidx] = max(0, min(2.0, l_gain[_vl_lidx] + frame_wheel * 0.05));
+          s_dirty[oi] = 1; mark_dirty_pad(oi);
+        );
+      );
+
+    // Vel range readout (layers exist, except mode 1 which has full bar)
+    p_layer_cnt[oi] > 0 && p_layer_mode[oi] != 1 ? (
+      _cur_lidx = oi * MAX_LAYERS + overlay_layer;
+      gfx_setfont(1, "Arial", 10, 0);
+      gfx_set(0.65, 0.70, 0.75, 0.75);
+      sprintf(#_vr, "Vel %d-%d", (l_vel_lo[_cur_lidx] * 127)|0, (l_vel_hi[_cur_lidx] * 127)|0);
+      gfx_x = tab_x; gfx_y = ctrl_y + (p_layer_mode[oi] > 0 ? 26 : 0); gfx_drawstr(#_vr);
+    );
+);
+
+function _ov_draw_drop_and_close() (
+    // Drag-to-load into overlay pad
+    gfx_getdropfile(0, #df) ? (
+      // Tukan-style undo: REAPER's automatic chunk diff handles undo
+      // via the mark_dirty_pad(oi) call at end of this block. Audio
+      // is in @serialize (ser_ver >= 12). No CMD 46/48 dance.
+      // Check if drop landed on a specific layer tab (L1-L4) — switch to it
+      li = 0; loop(MAX_LAYERS,
+        tab_xi = tab_x + li * tab_w;
+        mx >= tab_xi && mx <= tab_xi + tab_w - 2 && my >= tab_y && my <= tab_y + tab_h ? (
+          overlay_layer = li;
+        );
+        li += 1;
+      );
+
+      // Legacy load: empty pad with L1 selected — load directly into legacy slot
+      overlay_layer == 0 && p_layer_cnt[oi] == 0 && s_len[oi] == 0 ? (
+        // Reset per-pad mix params so stale kit values don't leak into the new sample
+        p_gain[oi] = 1.0; p_pan[oi] = 0; p_tune[oi] = 0;
+        p_panL[oi] = 1.0; p_panR[oi] = 1.0;
+        s_start[oi] = 0; s_end[oi] = 1.0;
+        load_from_path(oi, #df);
+        recalc_pad(oi);
+        s_dirty[oi] = 1;
+      ) : (
+        // Layer-aware load — replace current layer
+        p_layer_cnt[oi] == 0 && s_len[oi] > 0 ? (
+          // Promote legacy audio into layer 0 first
+          _lidx = oi * MAX_LAYERS;
+          l_len[_lidx] = min(s_len[oi], LAYER_SIZE);
+          l_start[_lidx] = s_start[oi];
+          l_end[_lidx] = s_end[oi];
+          l_sr[_lidx] = s_sr[oi];
+          l_norm[_lidx] = s_norm[oi];
+          l_norm_gain[_lidx] = s_norm_gain[oi];
+          strcpy(LPATH_STR_BASE + _lidx, get_path_slot(oi));
+          p_layer_cnt[oi] = 1;
+          p_layer_mode[oi] == 0 ? ( p_layer_mode[oi] = 3; );
+        );
+        load_layer_from_path(oi, overlay_layer, #df);
+        p_layer_mode[oi] == 0 ? ( p_layer_mode[oi] = 3; );
+        recalc_pad(oi);
+        s_dirty[oi] = 1;
+      );
+      mark_dirty_pad(oi);
+      sync_note_names();
+      gfx_getdropfile(-1);
+    );
+
+    // Close on: click X, click outside panel, ESC
+    in_close = mx>=cl_x&&mx<=cl_x+18&&my>=cl_y&&my<=cl_y+18;
+    in_panel  = mx>=op_x&&mx<=op_x+op_w&&my>=op_y&&my<=op_y+op_h;
+    (_raw_lmb_down && (in_close || !in_panel)) || _char == 27 ? (
+      // Clear knob drag flags (mem[1]) to prevent stuck dragging state (3.1/3.2)
+      // Each knob uses KS=16 memory slots; mem[1] is the is_dragging flag.
+      _ov_km = km_pads + oi * KM_PER_PAD * KS;
+      _ov_ki = 0; loop(KM_PER_PAD, _ov_km[_ov_ki * KS + 1] = 0; _ov_ki += 1;);
+      _ov_km = km_fx + oi * KM_FX_PER_PAD * KS;
+      _ov_ki = 0; loop(KM_FX_PER_PAD, _ov_km[_ov_ki * KS + 1] = 0; _ov_ki += 1;);
+      overlay_pad = -1; active_id = -1; overlay_layer = 0;
+    );
+);
+
+function swing_grid_draw_overlay() (
+    oi = overlay_pad;
+    _cb = oi * 3; pr = col_rgba[_cb]; pgg = col_rgba[_cb+1]; pb = col_rgba[_cb+2];
+
+    // Backdrop — covers entire window including header for true modal feel
+    gfx_set(0, 0, 0, 0.55);
+    gfx_rect(0, 0, gfx_w, gfx_h);
+
+    // Panel dimensions
+    op_w = 420; op_h = 560;
+    op_x = (gfx_w - op_w) / 2;
+    op_y = 28 + ((gfx_h - 28 - op_h) / 2);
+
+    // Restore mouse state inside overlay panel (was suppressed by modal gate)
+    _in_ov ? (
+      lmb_down = _ov_lmb_down; rmb_down = _ov_rmb_down;
+      LMB = _ov_LMB; RMB = _ov_RMB;
+      frame_wheel = _ov_wheel;
+    );
+
+    _ov_draw_header_and_colorpicker();
+    _ov_draw_layers_and_mode();
+    _ov_draw_waveform_and_adsr();
+    _ov_draw_eq_and_filters();
+    _ov_draw_fx_knobs();
+    _ov_draw_buttons();
+    _ov_draw_drop_and_close();
+);

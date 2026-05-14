@@ -1,0 +1,143 @@
+// rk_drumkit_fx.jsfx-inc — Per-pad FX chain for DrumKit_ReaKit
+// (c) EON Studios — All Rights Reserved
+//
+// Processes the per-pad insert FX chain + send accumulation.
+// Requires all fx_* arrays and drive_process() from rk_drumkit_dsp.jsfx-inc.
+// Call process_pad_fx(i) per pad per sample after voice mixing into pad_accL/R.
+// After processing, _pfxL/_pfxR contain the post-FX stereo output.
+// _pfx_sendL/_pfx_sendR contain the pre-pan signal for send buses.
+
+@init
+
+// Denormal guard for per-pad compressor envelope (same as bus comp's cmp_denorm)
+FX_CMP_DENORM = pow(10, -30);
+
+// ─── Per-pad FX chain: HPF → LPF → EQ → COMP → Bitcrush → Drive ──
+// Reads pad_accL[i]/pad_accR[i], writes _pfxL/_pfxR (post-pan),
+// and _pfx_sendL/_pfx_sendR (post-FX, pre-pan — for send buses).
+function process_pad_fx(i)
+local(_aL, _aR, _bq_base, _bq,
+      _bc_hold, _bc_levels, _sm,
+      _cmp_det, _cmp_lev, _cmp_gr, _cmp_lin, _cmp_wet_L, _cmp_wet_R)
+(
+  _aL = pad_accL[i];
+  _aR = pad_accR[i];
+
+  // Only process if pad has signal (or filters have residual energy)
+  (abs(_aL) > 0.0000001 || abs(_aR) > 0.0000001 ||
+   abs(fx_hpf_stL[i]) > 0.0000001 || abs(fx_lpf_stL[i]) > 0.0000001) ? (
+
+    _bq_base = bq_pad + i * BQ_PER_PAD * BQ_STEREO_SIZE;
+
+    // ── HPF (2nd-order biquad highpass) ──
+    fx_hpf_freq[i] > 25 ? (
+      _bq = _bq_base + BQ_PAD_HPF * BQ_STEREO_SIZE;
+      _aL = bq_process_L(_bq, _aL);
+      _aR = bq_process_R(_bq, _aR);
+      // Track state for residual energy detection
+      fx_hpf_stL[i] = _aL;
+      fx_hpf_stR[i] = _aR;
+    );
+
+    // ── LPF (2nd-order biquad lowpass) ──
+    fx_lpf_freq[i] < 19500 ? (
+      _bq = _bq_base + BQ_PAD_LPF * BQ_STEREO_SIZE;
+      _aL = bq_process_L(_bq, _aL);
+      _aR = bq_process_R(_bq, _aR);
+      fx_lpf_stL[i] = _aL;
+      fx_lpf_stR[i] = _aR;
+    );
+
+    // ── 3-band EQ: low shelf + mid peak + high shelf (biquad) ──
+    (fx_eq_lo[i] != 0 || fx_eq_mid[i] != 0 || fx_eq_hi[i] != 0) ? (
+      _bq = _bq_base + BQ_PAD_LO * BQ_STEREO_SIZE;
+      _aL = bq_process_L(_bq, _aL);
+      _aR = bq_process_R(_bq, _aR);
+      _bq = _bq_base + BQ_PAD_MID * BQ_STEREO_SIZE;
+      _aL = bq_process_L(_bq, _aL);
+      _aR = bq_process_R(_bq, _aR);
+      _bq = _bq_base + BQ_PAD_HI * BQ_STEREO_SIZE;
+      _aL = bq_process_L(_bq, _aL);
+      _aR = bq_process_R(_bq, _aR);
+    );
+
+    // ── Compressor (one-knob, 3 modes: PUNCH/GLUE/SQUASH) ──
+    // Peak-detecting feed-forward VCA compressor with soft knee.
+    // Coefficients precomputed per mode in recalc_pad_comp(i).
+    fx_cmp_amt[i] > 0.01 ? (
+      // Stereo-linked peak detection
+      _cmp_det = max(abs(_aL), abs(_aR));
+
+      // Envelope follower (instant attack via max, exponential release)
+      _cmp_det > fx_cmp_env[i]
+        ? fx_cmp_env[i] = _cmp_det + (fx_cmp_env[i] - _cmp_det) * fx_cmp_at_c[i]
+        : fx_cmp_env[i] = _cmp_det + (fx_cmp_env[i] - _cmp_det) * fx_cmp_rel_c[i];
+      fx_cmp_env[i] = max(fx_cmp_env[i], FX_CMP_DENORM);  // denormal guard
+
+      // Fast path: below knee onset → no gain reduction
+      fx_cmp_env[i] < fx_cmp_knee_lo_lin[i] ? (
+        _cmp_lin = 1.0;
+      ) : (
+        // Level to dB (log required — envelope is in active compression range)
+        _cmp_lev = log(fx_cmp_env[i]) * 8.6858896381;  // 20/log(10)
+
+        // Soft-knee gain computer
+        _cmp_lev <= fx_cmp_knee_hi[i] && fx_cmp_knee_inv[i] > 0 ? (
+          _cmp_gr = (fx_cmp_inv_ratio[i] - 1) * (_cmp_lev - fx_cmp_knee_lo[i])
+                    * (_cmp_lev - fx_cmp_knee_lo[i]) * fx_cmp_knee_inv[i];
+        ) : (
+          _cmp_gr = (_cmp_lev - fx_cmp_thresh[i]) * (fx_cmp_inv_ratio[i] - 1);
+        );
+
+        // Cache exp(): only recompute when GR changes > 0.05 dB
+        abs(_cmp_gr - fx_cmp_last_gr[i]) > 0.05 ? (
+          fx_cmp_last_lin[i] = exp(_cmp_gr * 0.11512925465);
+          fx_cmp_last_gr[i] = _cmp_gr;
+        );
+        _cmp_lin = fx_cmp_last_lin[i];
+      );
+
+      // Apply: full wet (compression + reduced auto-makeup). The amt knob
+      // already drives compression depth via the threshold mapping in
+      // recalc_pad_comp() — wet/dry mix would double-up that effect. Sends
+      // (fx_snd_dly / fx_snd_rvb / Output bus) handle parallel compression
+      // workflows by routing the dry signal independently.
+      _aL = _aL * _cmp_lin * fx_cmp_makeup_lin[i];
+      _aR = _aR * _cmp_lin * fx_cmp_makeup_lin[i];
+    );
+
+    // ── Bitcrush (sample-rate reduction + bit-depth reduction) ──
+    (fx_bc_rate[i] > 0.01 || fx_bc_bits[i] < 15.5) ? (
+      _bc_hold = 1 + (fx_bc_rate[i] * 63) | 0;
+      fx_bc_cnt[i] += 1;
+      fx_bc_cnt[i] >= _bc_hold ? (
+        fx_bc_cnt[i] = 0;
+        _bc_levels = fx_bc_lvl[i];  // precomputed in recalc_fx
+        fx_bc_holdL[i] = floor(_aL * _bc_levels + 0.5) / _bc_levels;
+        fx_bc_holdR[i] = floor(_aR * _bc_levels + 0.5) / _bc_levels;
+      );
+      _aL = fx_bc_holdL[i];
+      _aR = fx_bc_holdR[i];
+    );
+
+    // ── Drive (5 modes: SOFT/TUBE/TAPE/FUZZ/CLIP) ──
+    // Wet/dry mix: drive knob blends clean → fully saturated.
+    // Fixed 8x gain into saturator for heavy harmonics at any mix level.
+    fx_sat_drv[i] > 0.01 ? (
+      drive_process(_aL * 8.0, _aR * 8.0, fx_drv_mode[i] | 0);
+      _aL += (_doL - _aL) * fx_sat_drv[i];
+      _aR += (_doR - _aR) * fx_sat_drv[i];
+    );
+
+    // Post-FX, pre-pan signal for send buses
+    _pfx_sendL = _aL;
+    _pfx_sendR = _aR;
+
+    // ── Apply pan (global_vol applied once at master bus in @sample) ──
+    _pfxL = _aL * p_panL[i];
+    _pfxR = _aR * p_panR[i];
+  ) : (
+    _pfxL = 0; _pfxR = 0;
+    _pfx_sendL = 0; _pfx_sendR = 0;
+  );
+);

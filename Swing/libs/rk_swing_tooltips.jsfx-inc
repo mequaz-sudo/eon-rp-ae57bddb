@@ -1,0 +1,113 @@
+// rk_swing_tooltips.jsfx-inc
+// Hover-tooltip subsystem for Swing UI panels.
+// (c) EON Studios — All Rights Reserved
+//
+// Usage from any UI panel:
+//
+//   In a control's hover branch:
+//     _in_xxx ? swing_tooltip_check(ZONE_ID, "Tooltip text here");
+//
+//   Once at end of @gfx, AFTER all panel draws:
+//     swing_tooltip_draw();
+//
+// Each tooltipped control needs a unique ZONE_ID (any integer >= 1).
+// Moving between zones resets the timer. Hovering for > _tt_delay_s
+// (0.5 sec by default) reveals the tooltip text. Leaving the area
+// clears the tooltip and resets the timer for the next hover.
+//
+// swing_tooltip_draw() is responsible for:
+//   1. Rendering the tooltip box (if a hover survived the delay)
+//   2. Resetting per-frame state (so the next frame starts fresh)
+// Therefore it must be called EXACTLY ONCE per @gfx tick, at the end.
+
+@init
+
+// Persistent across frames (timer continuity)
+tt_hover_zone = -1;
+tt_hover_t0   = -1;
+
+// Per-frame (set by check, consumed by draw, cleared by draw)
+_tt_zone_now = -1;
+strcpy(#_tt_render_text, "");
+
+_tt_delay_s = 0.5;  // 500ms hover before tooltip appears
+
+// tooltips_enabled is declared/serialized in Swing_ReaKit.jsfx (ser_ver 43).
+// Default 1 (visible). User toggles via the TIPS button in the controls panel.
+// When 0, check() is a no-op AND draw() skips the box — full disable, no
+// per-frame work beyond the gate.
+
+// Mark a control as currently hovered. Caller is responsible for
+// the actual hover detection (mx/my in rect). zone_id must be unique
+// per tooltipped control; reusing one across controls would make
+// moving between them appear as "still hovering same zone" and
+// suppress the timer reset.
+//
+// text accepts literal strings OR #named string handles. The `*`
+// suffix is NOT used here — that's for namespace-by-reference, not
+// strings (which EEL2 passes as numeric handles transparently).
+function swing_tooltip_check(zone_id, text)
+local()
+(
+  tooltips_enabled ? (
+    _tt_zone_now = zone_id;
+    zone_id != tt_hover_zone ? (
+      tt_hover_zone = zone_id;
+      tt_hover_t0   = time_precise();
+    );
+    time_precise() - tt_hover_t0 > _tt_delay_s ? (
+      strcpy(#_tt_render_text, text);
+    );
+  );
+);
+
+// Render the tooltip box (if any) and reset per-frame state.
+// Call ONCE at end of @gfx, after all panel draws — the box draws
+// on top of everything else.
+function swing_tooltip_draw()
+local(_w, _h, _pad, _bw, _bh, _x, _y, _tw, _th)
+(
+  // Visual upgrades (v43): bigger bold font, more padding, brighter
+  // text + background, thicker border. Tooltips are now genuinely
+  // readable instead of squinty fine print.
+  (tooltips_enabled && strlen(#_tt_render_text) > 0) ? (
+    gfx_setfont(1, "Arial", 11, 'b');
+    gfx_measurestr(#_tt_render_text, _w, _h);
+    _pad = 8;
+    _bw = _w + 2 * _pad;
+    _bh = _h + 2 * _pad;
+
+    // Default position: below-right of cursor. Edge-clamp to viewport.
+    _x = mx + 14;
+    _y = my + 20;
+    _x + _bw > gfx_w ? _x = mx - 14 - _bw;
+    _y + _bh > gfx_h ? _y = my - 10 - _bh;
+    _x < 2 ? _x = 2;
+    _y < 2 ? _y = 2;
+
+    // Dark fill (more opaque), 2px border (brighter), near-white text
+    gfx_set(0.04, 0.04, 0.06, 0.95);
+    gfx_rect(_x, _y, _bw, _bh);
+    gfx_set(0.50, 0.55, 0.60, 1);
+    gfx_rect(_x, _y, _bw, 2);
+    gfx_rect(_x, _y + _bh - 2, _bw, 2);
+    gfx_rect(_x, _y, 2, _bh);
+    gfx_rect(_x + _bw - 2, _y, 2, _bh);
+    gfx_set(0.95, 0.95, 0.95, 1);
+    gfx_x = _x + _pad;
+    gfx_y = _y + _pad;
+    gfx_drawstr(#_tt_render_text);
+  );
+
+  // Per-frame reset. If no check() set _tt_zone_now this frame, the
+  // mouse left the tooltipped area — clear the persistent zone so the
+  // next hover starts a fresh _tt_delay_s wait (otherwise re-entering
+  // the same zone would instantly re-show the tooltip from a stale
+  // timer).
+  _tt_zone_now == -1 ? tt_hover_zone = -1;
+  _tt_zone_now = -1;
+
+  // Clear render text for next frame. A control that's still hovered
+  // will re-set this on the next check() call after delay elapses.
+  strcpy(#_tt_render_text, "");
+);

@@ -1,0 +1,151 @@
+// rk_compressor.jsfx-inc — VCA compressor for DrumKit_ReaKit
+// (c) EON Studios — All Rights Reserved
+//
+// DSP derived from Prism Comp CLEAN/BUS VCA topology.
+// Peak-detecting feed-forward compressor with soft knee.
+//
+// Call cmp_init(mem_start) from @init, cmp_recalc() when params change,
+// cmp_process(inL, inR) from @sample. Returns via cmp_outL / cmp_outR.
+// GR available as cmp_gr_db (negative dB, for metering).
+//
+// Global parameters (set from GUI before calling cmp_recalc):
+//   cmp_thresh   — threshold in dB (e.g. -20 to 0)
+//   cmp_ratio    — compression ratio (1.0 = off, 20+ = limiter)
+//   cmp_attack   — attack time in ms (0.1–100)
+//   cmp_release  — release time in ms (10–1000)
+//   cmp_knee     — soft knee width in dB (0 = hard, 6–12 = soft)
+//   cmp_makeup   — output gain in dB
+//   cmp_mix      — wet/dry mix (0–1, 1 = fully compressed)
+
+@init
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+
+function cmp_init(mem_start)
+(
+  // GR history for meter display (scrolling bar)
+  CMP_GR_HIST_LEN = 128;
+  cmp_gr_hist = mem_start; mem_start += CMP_GR_HIST_LEN;
+  cmp_gr_hist_pos = 0;
+  memset(cmp_gr_hist, 0, CMP_GR_HIST_LEN);
+
+  // Runtime state
+  cmp_env     = 0;    // peak envelope
+  cmp_gr_db   = 0;    // current gain reduction (dB, negative)
+  cmp_outL    = 0;
+  cmp_outR    = 0;
+
+  // Denorm constant
+  cmp_denorm = pow(10, -30);
+
+  // Cached exp() state for per-sample fast path
+  cmp_last_gr_db = 0;
+  cmp_last_lin = 1.0;
+
+  // Return next free memory slot
+  mem_start;
+);
+
+// ─── Recalculate coefficients ────────────────────────────────────────────────
+// Call whenever cmp_thresh/ratio/attack/release/knee/makeup change.
+
+function cmp_recalc()
+local(sr)
+(
+  sr = srate;
+  sr <= 0 ? ( sr = 44100; );  // guard
+
+  // Attack / release envelope coefficients
+  cmp_at_coeff  = exp(-1 / (sr * max(cmp_attack, 0.1) * 0.001));
+  cmp_rel_coeff = exp(-1 / (sr * max(cmp_release, 10) * 0.001));
+
+  // Threshold / knee precomputation
+  cmp_inv_ratio = 1 / max(cmp_ratio, 1.0001);
+  cmp_knee_lo   = cmp_thresh - cmp_knee * 0.5;
+  cmp_knee_hi   = cmp_thresh + cmp_knee * 0.5;
+  cmp_knee_inv  = cmp_knee > 0 ? (1 / (2 * cmp_knee)) : 0;
+
+  // Linear level at knee onset (below this, GR = 0 — skip log/exp entirely)
+  cmp_knee_lo_lin = exp(cmp_knee_lo * 0.11512925465);
+
+  // Output gain
+  cmp_makeup_lin = exp(cmp_makeup * 0.11512925465);  // db2lin
+
+  // Mix
+  cmp_mix_frac = max(0, min(1, cmp_mix));
+
+  // Log scale factor (avoids log10 in hot path)
+  cmp_log10e_x20 = 20 / log(10);   // ≈ 8.6859
+
+  // GR display smoother
+  cmp_gr_smooth_coeff = exp(-1 / (srate * 0.01));  // ~10ms
+  cmp_gr_smooth = 0;
+);
+
+// ─── Process one stereo sample ───────────────────────────────────────────────
+// Feed-forward peak-detecting VCA compressor.
+// Inputs: inL, inR (audio samples)
+// Outputs: cmp_outL, cmp_outR, cmp_gr_db
+
+function cmp_process(inL, inR)
+local(_det, _level_db, _gr_target, _excess, _lin, _dryL, _dryR)
+(
+  // Save dry for mix
+  _dryL = inL;
+  _dryR = inR;
+
+  // Peak detection — stereo linked
+  _det = max(abs(inL), abs(inR));
+
+  // Envelope follower: instant attack via max, exponential release
+  cmp_env = _det > cmp_env
+    ? _det + (cmp_env - _det) * cmp_at_coeff
+    : _det + (cmp_env - _det) * cmp_rel_coeff;
+  cmp_env = max(cmp_env, cmp_denorm);  // prevent denormal CPU spikes on silence
+
+  // Fast path: skip log/exp when envelope is below knee onset.
+  // cmp_knee_lo_lin is precomputed in cmp_recalc() as the linear threshold
+  // at the bottom of the knee. Below this, GR is always 0 dB (_lin = 1.0).
+  cmp_env < cmp_knee_lo_lin ? (
+    cmp_gr_db = 0;
+    _lin = 1.0;
+  ) : (
+    // Level to dB (log required — envelope is in active compression range)
+    _level_db = log(cmp_env) * cmp_log10e_x20;
+
+    // Soft-knee gain computer
+    _level_db <= cmp_knee_hi && cmp_knee > 0 ? (
+      _excess = _level_db - cmp_knee_lo;
+      _gr_target = (cmp_inv_ratio - 1) * _excess * _excess * cmp_knee_inv;
+    ) : (
+      _gr_target = (_level_db - cmp_thresh) * (cmp_inv_ratio - 1);
+    );
+
+    cmp_gr_db = _gr_target;
+
+    // Cache exp(): only recompute when GR changes by > 0.05 dB
+    abs(cmp_gr_db - cmp_last_gr_db) > 0.05 ? (
+      cmp_last_lin = exp(cmp_gr_db * 0.11512925465);
+      cmp_last_gr_db = cmp_gr_db;
+    );
+    _lin = cmp_last_lin;
+  );
+
+  // Smooth GR for display
+  cmp_gr_smooth += (cmp_gr_db - cmp_gr_smooth) * (1 - cmp_gr_smooth_coeff);
+
+  // GR history for scrolling meter
+  cmp_gr_hist[cmp_gr_hist_pos] = cmp_gr_smooth;
+  cmp_gr_hist_pos += 1;
+  cmp_gr_hist_pos >= CMP_GR_HIST_LEN ? cmp_gr_hist_pos = 0;
+
+  // Apply gain reduction
+  cmp_outL = inL * _lin * cmp_makeup_lin;
+  cmp_outR = inR * _lin * cmp_makeup_lin;
+
+  // Wet/dry mix
+  cmp_mix_frac < 1 ? (
+    cmp_outL = _dryL + (cmp_outL - _dryL) * cmp_mix_frac;
+    cmp_outR = _dryR + (cmp_outR - _dryR) * cmp_mix_frac;
+  );
+);

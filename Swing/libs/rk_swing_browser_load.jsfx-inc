@@ -1,0 +1,204 @@
+// rk_swing_browser_load.jsfx-inc
+// Browser sample-load handlers (CMD 63 / 64) extracted from Swing_ReaKit.jsfx.
+// (c) EON Studios — All Rights Reserved
+//
+// Both functions live in @gfx because the browser companion writes the path
+// chars + control fields to gmem and the JSFX needs to consume them on the UI
+// thread (clear_pad / load_*_from_path touch shared sample buffers, and
+// sliderchange must run from the UI side). They share the same protocol:
+//
+//   GS_BROWSE_PAD          — target pad index
+//   GS_BROWSER_PATH        — UTF-8 path chars (max GS_BROWSER_PATH_MAX)
+//   GS_BROWSER_PATH_LEN    — path length
+//   GS_BROWSE_LAYER        — (CMD 64 only) layer index 0..MAX_LAYERS-1
+//
+// Both kill any active voices on the target pad and arm a 10ms crossfade
+// (#_browser_path / _xf_* / v_* live at file scope). Pad names come from
+// auto_name_from_file() called inside load_from_path / load_layer_from_path
+// and are pushed to gmem PADNAME unconditionally inside the handler (no
+// gmem read, no dependency on sync_note_names firing).
+//
+// sync_note_names is called directly (not deferred) so CMD=52 clears
+// before the user's next action. The multi-load queue waits one bridge
+// round-trip per pad, but this avoids CMD=52 colliding with kit-load
+// or other bridge commands the user triggers right after a drag.
+//
+// Undo coverage: opens an Undo_BeginBlock via CMD 46 (UNDO_DESC=3 →
+// "Swing: Load Sample") and runs synchronously. The block is closed by
+// the bridge's leak-timer (10s) — full undo with audio buffer restore
+// requires the v2 internal undo system. Until then, Ctrl+Z restores the
+// path-string metadata via REAPER's chunk diff but the freemem audio
+// buffer stays loaded; pads play the new sample with the old path label
+// after undo. Documented as a known limitation.
+
+@init
+
+// ─── CMD 63 — single-pad sample load ────────────────────────────────────
+// Fully resets the pad (clear_pad) before loading: leaving stale layers
+// would cause Sum-mode mixing with the previous sample, and stale per-pad
+// gain/pan/tune would leak the old kit's mix into the new sound.
+function swing_browser_load_pad()
+local(_bp_pad, _bp_len, _xf_vi, _ci, _cn, _cnl)
+(
+  // Multi-instance gate: only respond if browser targets this instance
+  // (or no specific target is set). Without this, a second Swing instance
+  // would also load the sample, hijacking the user's intended target.
+  _is_browser_target() ? (
+  _bp_pad = gmem[GS_BROWSE_PAD]|0;
+  _bp_len = gmem[GS_BROWSER_PATH_LEN]|0;
+  _bp_pad >= 0 && _bp_pad < NUM_PADS && _bp_len > 0 && _bp_len < GS_BROWSER_PATH_MAX ? (
+    // Tukan-style undo: REAPER's chunk diff captures the load via
+    // mark_dirty_pad(_bp_pad) below. Audio is in @serialize.
+    // Kill any active voices on this pad + activate crossfade before overwriting buffer
+    _xf_vi = 0; loop(MAX_VOICES + 1,
+      v_slot[_xf_vi] == _bp_pad ? ( v_pos[_xf_vi] = -1; v_env[_xf_vi] = 0; v_stage[_xf_vi] = 0; );
+      _xf_vi += 1;
+    );
+    // Gate threshold -40 dB: only arm crossfade when residue is clearly
+    // audible. Below -40 dB, snap-cut is masked by noise floor — and arming
+    // for sub-audible residue means the ramp attenuates the next hit's
+    // transient before the @sample short-circuit (-80 dB) can deactivate.
+    !_xf_active && abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+      _xf_pos = 0;
+      _xf_len = max(1, (0.010 * srate)|0);  // 10ms crossfade for single pad
+      _xf_active = 1;
+    );
+    strcpy(#_browser_path, "");
+    _ci = 0; loop(_bp_len,
+      str_setchar(#_browser_path, _ci, gmem[GS_BROWSER_PATH + _ci]);
+      _ci += 1;
+    );
+    str_setlen(#_browser_path, _bp_len);
+    // Single-sample drop semantics: fully reset the pad before loading.
+    // (Leaving stale layers causes Sum-mode mixing with the old kit sound;
+    //  leaving stale per-pad gain/pan/tune leaks kit mix into the new sample.)
+    clear_pad(_bp_pad);
+    load_from_path(_bp_pad, #_browser_path);
+    recalc_pad(_bp_pad);
+    recalc_fx(_bp_pad);   // defensive: rebuild per-pad biquad coefs to match
+                          // defaults clear_pad wrote (process_pad_fx gates on
+                          // params so stale coefs are unreachable, but keep
+                          // the state tree consistent for debugging/display).
+    s_dirty[_bp_pad] = 1;
+    // Pad name → gmem PADNAME: auto_name_from_file() (called inside
+    // load_from_path) already set cname. Push it to gmem now so:
+    //   (a) browser sees the new name on its very next read,
+    //   (b) reverse-sync can't copy a stale @block-clobbered gmem
+    //       value back into cname on the next @gfx frame.
+    // sync_note_names does the same for ALL pads but its gate can
+    // fail (BRIDGE_ALIVE=0). This per-pad write is unconditional.
+    _cn = get_cname_slot(_bp_pad);
+    _cnl = strlen(_cn);
+    _ci = 0; loop(KIT_GMEM_PADNAME_LEN,
+      gmem[KIT_GMEM_PADNAMES + _bp_pad * KIT_GMEM_PADNAME_LEN + _ci] =
+        _ci < _cnl ? str_getchar(_cn, _ci) : 0;
+      _ci += 1;
+    );
+    // Write actual audio length (non-layered) or sentinel 1 (layered) so the
+    // bridge can read pad audio out of gmem without racing the @gfx mirror.
+    gmem[KIT_GMEM_AUDIOLEN + _bp_pad] =
+      s_len[_bp_pad] > 0 ? s_len[_bp_pad] :
+      (pad_has_audio(_bp_pad) ? 1 : 0);
+    mark_dirty_pad(_bp_pad);
+    col_dirty = 1;  // Re-derive auto-color hue from new filename (CMD 63)
+    // Immediate auto-color derive + gmem write so browser pads update on
+    // the same @gfx cycle. Without this, the browser only sees the new
+    // color on the NEXT frame (col_dirty → rebuild → sync runs before
+    // CMD 63 in the @gfx order, so the per-frame sync writes stale hues
+    // for the frame CMD 63 fires).
+    col_auto_mode_id == COL_AUTO_DRUMTYPE ? (
+      col_auto_hue[_bp_pad] = swing_color_drumtype_hue(_bp_pad);
+    ) : col_auto_mode_id == COL_AUTO_OUTPUT ? (
+      col_auto_hue[_bp_pad] = p_output[_bp_pad] / 16.0;
+    ) : col_auto_mode_id == COL_AUTO_RAINBOW ? (
+      col_auto_hue[_bp_pad] = _bp_pad / 16.0;
+    );
+    gmem[KIT_GMEM_META + _bp_pad * KIT_GMEM_META_PP + 12] =
+      col_auto_mode_id > 0 ? col_auto_hue[_bp_pad] : p_color[_bp_pad];
+    // Visual feedback: trigger the existing pad_flash fade (8-frame white
+    // overlay → ~250ms confirmation that the drop landed and the category
+    // color got assigned). Reuses rk_swing_ui_grid_pads.jsfx-inc:85-89.
+    pad_flash[_bp_pad] = 12;
+    // Consume CMD before sync_note_names: its gate requires CMD==0.
+    gmem[KIT_GMEM_CMD] = 0;
+    sync_note_names();
+  ) : (
+    // Validation failed (bad pad index or path length) — still consume CMD
+    // so the bridge isn't stuck waiting on an in-flight command.
+    gmem[KIT_GMEM_CMD] = 0;
+  );
+  );  // _is_browser_target gate
+);
+
+// ─── CMD 64 — per-layer sample load ─────────────────────────────────────
+// Same protocol as CMD 63 with the addition of GS_BROWSE_LAYER. Does NOT
+// clear the pad: layer load is additive. Pad name is only refreshed when
+// layer 0 is targeted (layers 1..3 keep the existing display name).
+function swing_browser_load_layer()
+local(_bp_pad, _bp_layer, _bp_len, _xf_vi, _ci, _cn, _cnl)
+(
+  // Multi-instance gate (see swing_browser_load_pad)
+  _is_browser_target() ? (
+  _bp_pad = gmem[GS_BROWSE_PAD]|0;
+  _bp_layer = gmem[GS_BROWSE_LAYER]|0;
+  _bp_len = gmem[GS_BROWSER_PATH_LEN]|0;
+  _bp_pad >= 0 && _bp_pad < NUM_PADS && _bp_layer >= 0 && _bp_layer < MAX_LAYERS && _bp_len > 0 && _bp_len < GS_BROWSER_PATH_MAX ? (
+    // Tukan-style undo: REAPER's chunk diff captures the load via
+    // mark_dirty_pad(_bp_pad) below. Audio is in @serialize.
+    // Kill active voices on this pad + crossfade
+    _xf_vi = 0; loop(MAX_VOICES + 1,
+      v_slot[_xf_vi] == _bp_pad ? ( v_pos[_xf_vi] = -1; v_env[_xf_vi] = 0; v_stage[_xf_vi] = 0; );
+      _xf_vi += 1;
+    );
+    // Gate threshold -40 dB (see CMD 63 above for rationale).
+    !_xf_active && abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+      _xf_pos = 0;
+      _xf_len = max(1, (0.010 * srate)|0);
+      _xf_active = 1;
+    );
+    strcpy(#_browser_path, "");
+    _ci = 0; loop(_bp_len,
+      str_setchar(#_browser_path, _ci, gmem[GS_BROWSER_PATH + _ci]);
+      _ci += 1;
+    );
+    str_setlen(#_browser_path, _bp_len);
+    load_layer_from_path(_bp_pad, _bp_layer, #_browser_path);
+    recalc_pad(_bp_pad);
+    s_dirty[_bp_pad] = 1;
+    // Pad name → gmem PADNAME (same as CMD 63 — see comment there).
+    _cn = get_cname_slot(_bp_pad);
+    _cnl = strlen(_cn);
+    _ci = 0; loop(KIT_GMEM_PADNAME_LEN,
+      gmem[KIT_GMEM_PADNAMES + _bp_pad * KIT_GMEM_PADNAME_LEN + _ci] =
+        _ci < _cnl ? str_getchar(_cn, _ci) : 0;
+      _ci += 1;
+    );
+    gmem[KIT_GMEM_AUDIOLEN + _bp_pad] =
+      s_len[_bp_pad] > 0 ? s_len[_bp_pad] :
+      (pad_has_audio(_bp_pad) ? 1 : 0);
+    mark_dirty_pad(_bp_pad);
+    col_dirty = 1;  // Re-derive auto-color hue from new filename (CMD 64)
+    // Immediate auto-color derive + gmem write (same rationale as CMD 63)
+    col_auto_mode_id == COL_AUTO_DRUMTYPE ? (
+      col_auto_hue[_bp_pad] = swing_color_drumtype_hue(_bp_pad);
+    ) : col_auto_mode_id == COL_AUTO_OUTPUT ? (
+      col_auto_hue[_bp_pad] = p_output[_bp_pad] / 16.0;
+    ) : col_auto_mode_id == COL_AUTO_RAINBOW ? (
+      col_auto_hue[_bp_pad] = _bp_pad / 16.0;
+    );
+    gmem[KIT_GMEM_META + _bp_pad * KIT_GMEM_META_PP + 12] =
+      col_auto_mode_id > 0 ? col_auto_hue[_bp_pad] : p_color[_bp_pad];
+    // Visual feedback: trigger the existing pad_flash fade (8-frame white
+    // overlay → ~250ms confirmation that the drop landed and the category
+    // color got assigned). Reuses rk_swing_ui_grid_pads.jsfx-inc:85-89.
+    pad_flash[_bp_pad] = 12;
+    // Consume CMD before sync_note_names (see CMD 63 comment).
+    gmem[KIT_GMEM_CMD] = 0;
+    sync_note_names();
+  ) : (
+    // Validation failed (bad pad index or path length) — still consume CMD
+    // so the bridge isn't stuck waiting on an in-flight command.
+    gmem[KIT_GMEM_CMD] = 0;
+  );
+  );  // _is_browser_target gate
+);

@@ -1,0 +1,2337 @@
+// Swing
+// (c) EON Studios — All Rights Reserved
+desc: Swing
+tags: instrument, sampler, drums
+author: EON Studios
+version: 2.1
+
+slider1:root_note=36<0,127,1>-Base Note
+slider2:master_db=0<-60,12,0.1>-Master Volume (dB)
+// slider3 + slider6..slider21 are hidden COUNTERS that increment on
+// every parameter change. REAPER captures the FX chunk for undo only
+// when a slider VALUE actually changes; coalesces multiple changes to
+// the SAME slider within ~1s into one undo entry. Different sliders
+// → separate undo entries even when rapid.
+//
+// Architecture:
+//   slider3        → global / master / non-pad changes (master VOL,
+//                     repeat division, master FX, color palette, etc.)
+//   slider6..21    → one per pad (pad 1 → slider6, pad 16 → slider21).
+//                     Mute pad 1 + solo pad 3 + vol pad 12 = three
+//                     different sliders → three separate undo entries.
+//
+// The mark_dirty() / mark_dirty_pad(idx) wrappers in
+// rk_swing_core.jsfx-inc do the increment + slider_automate.
+slider3:changed=0<0,1000000,1>-Dirty: Global (internal)
+slider4:instance_id=0<0,99999999,1>-Instance ID (internal)
+slider5:hi_quality_interp=1<0,1,1>-High-Quality Interp (cubic)
+slider6:dirty_p1=0<0,1000000,1>-Dirty: Pad 1 (internal)
+slider7:dirty_p2=0<0,1000000,1>-Dirty: Pad 2 (internal)
+slider8:dirty_p3=0<0,1000000,1>-Dirty: Pad 3 (internal)
+slider9:dirty_p4=0<0,1000000,1>-Dirty: Pad 4 (internal)
+slider10:dirty_p5=0<0,1000000,1>-Dirty: Pad 5 (internal)
+slider11:dirty_p6=0<0,1000000,1>-Dirty: Pad 6 (internal)
+slider12:dirty_p7=0<0,1000000,1>-Dirty: Pad 7 (internal)
+slider13:dirty_p8=0<0,1000000,1>-Dirty: Pad 8 (internal)
+slider14:dirty_p9=0<0,1000000,1>-Dirty: Pad 9 (internal)
+slider15:dirty_p10=0<0,1000000,1>-Dirty: Pad 10 (internal)
+slider16:dirty_p11=0<0,1000000,1>-Dirty: Pad 11 (internal)
+slider17:dirty_p12=0<0,1000000,1>-Dirty: Pad 12 (internal)
+slider18:dirty_p13=0<0,1000000,1>-Dirty: Pad 13 (internal)
+slider19:dirty_p14=0<0,1000000,1>-Dirty: Pad 14 (internal)
+slider20:dirty_p15=0<0,1000000,1>-Dirty: Pad 15 (internal)
+slider21:dirty_p16=0<0,1000000,1>-Dirty: Pad 16 (internal)
+slider22:midi_thru=0<0,1,1>-MIDI Pass-Through (forward notes to next FX)
+import libs/knobs_kbsg.jsfx-inc
+import libs/rk_biquad.jsfx-inc
+import libs/rk_drumkit_dsp.jsfx-inc
+import libs/rk_drumkit_fx.jsfx-inc
+import libs/rk_delay.jsfx-inc
+import libs/rk_reverb.jsfx-inc
+import libs/rk_compressor.jsfx-inc
+import libs/rk_swing_core.jsfx-inc
+import libs/rk_swing_defaults.jsfx-inc
+import libs/rk_swing_lcd.jsfx-inc
+import libs/rk_swing_colors.jsfx-inc
+import libs/rk_swing_warnings.jsfx-inc
+import libs/rk_swing_tooltips.jsfx-inc
+import libs/rk_swing_browser_load.jsfx-inc
+import libs/rk_swing_ui_state.jsfx-inc
+import libs/rk_swing_ui_panels_lcd.jsfx-inc
+import libs/rk_swing_ui_panels_mixer.jsfx-inc
+import libs/rk_swing_ui_panels_controls.jsfx-inc
+import libs/rk_swing_ui_grid_pads.jsfx-inc
+import libs/rk_swing_ui_grid_overlay_fx.jsfx-inc
+import libs/rk_swing_ui_grid_overlay.jsfx-inc
+import libs/rk_swing_block.jsfx-inc
+
+options:maxmem=72000000 no_meter gfx_hz=60
+options:gmem=Swing_Media_Transfer
+in_pin:none
+out_pin:Main L
+out_pin:Main R
+out_pin:Bus 2 L
+out_pin:Bus 2 R
+out_pin:Bus 3 L
+out_pin:Bus 3 R
+out_pin:Bus 4 L
+out_pin:Bus 4 R
+out_pin:Bus 5 L
+out_pin:Bus 5 R
+out_pin:Bus 6 L
+out_pin:Bus 6 R
+out_pin:Bus 7 L
+out_pin:Bus 7 R
+out_pin:Bus 8 L
+out_pin:Bus 8 R
+out_pin:Bus 9 L
+out_pin:Bus 9 R
+out_pin:Bus 10 L
+out_pin:Bus 10 R
+out_pin:Bus 11 L
+out_pin:Bus 11 R
+out_pin:Bus 12 L
+out_pin:Bus 12 R
+out_pin:Bus 13 L
+out_pin:Bus 13 R
+out_pin:Bus 14 L
+out_pin:Bus 14 R
+out_pin:Bus 15 L
+out_pin:Bus 15 R
+out_pin:Bus 16 L
+out_pin:Bus 16 R
+
+@init
+ext_noinit = 1.0;
+ext_tail_size = -1;
+
+// Generate unique instance ID (persists via slider4 + ext_noinit).
+//
+// Previous impl used `time_precise() * 100000` which had a 10µs
+// collision window — two instances spawned in the same audio block on
+// project load could end up with identical IDs (e.g. opening an old
+// project authored before instance_id was added, where both saved
+// slider4=0). All multi-instance routing breaks if IDs collide.
+//
+// New impl: gmem[KIT_GMEM_INSTANCE_NEXT] is a monotonic counter. Each
+// instance reads the current value, writes value+1 back, takes that
+// as its ID. JSFX @init runs sequentially on REAPER's main thread per
+// audio block, so the read-write pair is naturally atomic within a
+// single instance's init pass. Counter persists for the REAPER
+// session (gmem outlives individual JSFX instances).
+//
+// Duplicate detection: when REAPER copies an FX (Ctrl+drag, paste), the
+// new instance inherits the source's slider4 unchanged — the `slider4 < 1`
+// gate below misses this case. So we ALSO scan the instance registry: if
+// any other slot reports our id with a recent heartbeat, we know we're a
+// duplicate and mint a fresh id from the counter. The original instance
+// keeps its id; the copy gets a new one. (Constants are defined below in
+// the gmem layout section, but @init runs in source order — we forward-
+// reference here as the JSFX compiler resolves @init names lazily.)
+//
+// Note: addresses 2300..2331 + the 3-second timeout are baked literally
+// here so this collision check works even if a freshly-loaded chunk has
+// not yet executed the constant-assignment block further down.
+_init_collision = 0;
+slider4 >= 1 ? (
+  _init_si = 0;
+  loop(16,
+    _init_id = gmem[2300 + _init_si * 4];
+    _init_hb = gmem[2300 + _init_si * 4 + 1];
+    (_init_id == slider4 && _init_hb > 0 &&
+     (time_precise() - _init_hb) < 3.0) ? _init_collision = 1;
+    _init_si += 1;
+  );
+);
+(slider4 < 1 || _init_collision) ? (
+  // KIT_GMEM_INSTANCE_NEXT is defined later in @init (line ~540); JSFX
+  // runs @init sequentially so by name resolution would silently use 0
+  // here, which is KIT_GMEM_CMD — corrupting the bridge command channel
+  // and giving every fresh instance a "random" id read back from CMD.
+  // Use the literal slot 94 to bypass the variable-not-yet-assigned trap.
+  gmem[94] += 1;
+  slider4 = gmem[94];
+);
+instance_id = slider4;
+_init_collision = _init_si = _init_id = _init_hb = 0;  // tidy locals
+_reg_my_slot = -1;  // -1 = registry slot not yet claimed; @block claims on first run
+
+_last_block_time = time_precise();  // gap detector init (prevents false flush on first block)
+
+// ─── Constants ────────────────────────────────────────────────────────────
+NUM_PADS    = 16;
+MAX_VOICES  = 16;
+SLOT_SIZE   = 4000000;
+WV_RES      = 256;      // waveform cache points (higher = smoother LCD waveform)
+KS          = 16;       // knob memory slots
+SILENCE_T   = 10;
+END_FADE    = 256;
+DENORM_THR  = 0.00000000000000000001;  // 1e-20
+DBL_CLICK_T = 0.35;     // double-click detection window (seconds)
+MAX_LAYERS  = 4;
+LAYER_SIZE  = 1000000;  // SLOT_SIZE / MAX_LAYERS = samples per layer (interleaved stereo)
+LPATH_STR_BASE = 200;   // string slot base for layer paths (200–263)
+
+// ─── Memory layout ────────────────────────────────────────────────────────
+freemem = 0;
+
+p_gain      = freemem; freemem += NUM_PADS;
+p_pan       = freemem; freemem += NUM_PADS;
+p_tune      = freemem; freemem += NUM_PADS;  // ±24 semitones
+p_attack    = freemem; freemem += NUM_PADS;  // ms
+p_decay     = freemem; freemem += NUM_PADS;  // ms
+p_sustain   = freemem; freemem += NUM_PADS;  // 0–1
+p_release   = freemem; freemem += NUM_PADS;  // ms
+p_adsr_user = freemem; freemem += NUM_PADS;  // 1 = user has manually tuned ADSR (skip analyze_adsr on drag-in)
+p_mute      = freemem; freemem += NUM_PADS;
+p_solo      = freemem; freemem += NUM_PADS;
+p_note      = freemem; freemem += NUM_PADS;
+p_output    = freemem; freemem += NUM_PADS;  // output bus 0-7
+p_note_lock = freemem; freemem += NUM_PADS;  // 1 = custom MIDI note (survives root_note change)
+p_panL      = freemem; freemem += NUM_PADS;  // precomputed pan left
+p_panR      = freemem; freemem += NUM_PADS;  // precomputed pan right
+
+p_att_c     = freemem; freemem += NUM_PADS;  // precomputed coefficients
+p_dec_c     = freemem; freemem += NUM_PADS;
+p_rel_c     = freemem; freemem += NUM_PADS;
+p_inc_base  = freemem; freemem += NUM_PADS;  // pitch increment
+
+s_len       = freemem; freemem += NUM_PADS;
+s_start     = freemem; freemem += NUM_PADS;
+s_end       = freemem; freemem += NUM_PADS;
+s_skip      = freemem; freemem += NUM_PADS;
+s_norm      = freemem; freemem += NUM_PADS;
+s_norm_gain = freemem; freemem += NUM_PADS;
+s_dirty     = freemem; freemem += NUM_PADS;
+s_sr        = freemem; freemem += NUM_PADS;  // source sample rate
+
+// Per-layer metadata (NUM_PADS * MAX_LAYERS = 64 entries each)
+l_len       = freemem; freemem += NUM_PADS * MAX_LAYERS;  // sample length per layer (0 = empty)
+l_start     = freemem; freemem += NUM_PADS * MAX_LAYERS;  // start trim 0-1
+l_end       = freemem; freemem += NUM_PADS * MAX_LAYERS;  // end trim 0-1
+l_sr        = freemem; freemem += NUM_PADS * MAX_LAYERS;  // source sample rate
+l_norm      = freemem; freemem += NUM_PADS * MAX_LAYERS;  // normalize enable
+l_norm_gain = freemem; freemem += NUM_PADS * MAX_LAYERS;  // normalization gain
+l_vel_lo    = freemem; freemem += NUM_PADS * MAX_LAYERS;  // velocity split low threshold 0-1
+l_vel_hi    = freemem; freemem += NUM_PADS * MAX_LAYERS;  // velocity split high threshold 0-1
+l_rr_order  = freemem; freemem += NUM_PADS * MAX_LAYERS;  // round-robin play order (0-based)
+l_gain      = freemem; freemem += NUM_PADS * MAX_LAYERS;  // per-layer gain (0.0–2.0, 1.0=unity)
+
+// Per-pad layer control arrays
+p_layer_cnt = freemem; freemem += NUM_PADS;  // number of loaded layers (1-4, 0=legacy single)
+p_layer_mode= freemem; freemem += NUM_PADS;  // 0=single, 1=vel-split, 2=round-robin, 3=sum
+p_rr_idx    = freemem; freemem += NUM_PADS;  // round-robin index counter
+p_sum_tight = freemem; freemem += NUM_PADS;  // sum tightness: 0.0=tight, 1.0=loose
+p_rpt_div   = freemem; freemem += NUM_PADS;  // per-pad repeat division (0=OFF/follow global)
+p_rpt_ctr   = freemem; freemem += NUM_PADS;  // per-pad repeat sample counter
+p_rpt_swph  = freemem; freemem += NUM_PADS;  // per-pad repeat swing phase
+p_sample_offset = freemem; freemem += NUM_PADS;  // per-pad sample offset 0-1
+_blk_trig   = freemem; freemem += NUM_PADS;  // per-pad dedup: already triggered this @block
+_blk_off    = freemem; freemem += NUM_PADS;  // note-off received this @block
+_retrig_cd  = freemem; freemem += NUM_PADS;  // per-pad retrigger cooldown (samples remaining)
+v_pos       = freemem; freemem += MAX_VOICES + 1;
+v_slot      = freemem; freemem += MAX_VOICES + 1;
+v_gain      = freemem; freemem += MAX_VOICES + 1;
+v_note      = freemem; freemem += MAX_VOICES + 1;
+v_inc       = freemem; freemem += MAX_VOICES + 1;
+v_age       = freemem; freemem += MAX_VOICES + 1;
+v_env       = freemem; freemem += MAX_VOICES + 1;
+v_stage     = freemem; freemem += MAX_VOICES + 1;  // 1=atk 2=dec 3=sus 4=rel
+v_startpos  = freemem; freemem += MAX_VOICES + 1;  // saved start pos for loose sum timing
+v_decay_ct  = freemem; freemem += MAX_VOICES + 1;
+v_sg        = freemem; freemem += MAX_VOICES + 1;  // sample gain (norm or pad gain)
+v_layer     = freemem; freemem += MAX_VOICES + 1;  // which layer the voice is playing
+
+// Waveform thumbnail cache: WV_RES points per pad. Two caches for stereo
+// display: wv_cache holds the L-channel sample at each step, wv_cache_R
+// holds R. Mono files end up with identical L/R, so the pad display shows
+// a symmetric waveform; stereo files show the L and R envelopes diverging
+// (top half = |L|, bottom half = |R|). Both populated by build_wv_cache.
+wv_cache    = freemem; freemem += NUM_PADS * WV_RES;
+wv_cache_R  = freemem; freemem += NUM_PADS * WV_RES;
+
+// Knob memory: 7 knobs per pad (ATK/DEC/SUS/REL/GAIN/PAN/TUNE) + 1 global vol
+KM_PER_PAD  = 8;
+km_pads     = freemem; freemem += NUM_PADS * KM_PER_PAD * KS;
+km_gvol     = freemem; freemem += KS;
+km_swing    = freemem; freemem += KS;  // swing amount knob memory
+
+// Per-pad peak metering (written in @sample, read/reset in @gfx)
+p_peak      = freemem; freemem += NUM_PADS;
+p_peak_hold = freemem; freemem += NUM_PADS;
+
+// Repeat: track which pads are held via MIDI
+p_held      = freemem; freemem += NUM_PADS;
+p_held_vel  = freemem; freemem += NUM_PADS;
+
+// On-pad mini knobs: 2 per pad (VOL, PAN) — separate from overlay knobs
+KM_PAD_MINI = 2;
+km_pad_vol_pan = freemem; freemem += NUM_PADS * KM_PAD_MINI * KS;
+
+// Per-pad color hue (0.0–1.0 float, used with HSL→RGB)
+p_color     = freemem; freemem += NUM_PADS;
+
+// New per-pad controls: choke groups, one-shot, reverse
+p_choke     = freemem; freemem += NUM_PADS;  // choke group: 0=none, 1-8
+p_oneshot   = freemem; freemem += NUM_PADS;  // 1 = one-shot (ignore note-off, play through)
+p_reverse   = freemem; freemem += NUM_PADS;  // 1 = reverse playback
+p_swapLR    = freemem; freemem += NUM_PADS;  // 1 = swap left/right channels at the pad accumulator
+p_stereo    = freemem; freemem += NUM_PADS;  // 1 = source file was stereo (drives 2-waveform display); 0 = mono
+
+// ─── Per-pad FX parameters ──────────────────────────────────────────────
+fx_hpf_freq = freemem; freemem += NUM_PADS;  // HPF cutoff Hz (20–20000)
+fx_lpf_freq = freemem; freemem += NUM_PADS;  // LPF cutoff Hz (20–20000)
+fx_eq_lo    = freemem; freemem += NUM_PADS;  // EQ low  gain dB (-12..+12)
+fx_eq_mid   = freemem; freemem += NUM_PADS;  // EQ mid  gain dB (-12..+12)
+fx_eq_hi    = freemem; freemem += NUM_PADS;  // EQ high gain dB (-12..+12)
+fx_eq_lo_freq  = freemem; freemem += NUM_PADS;  // EQ low frequency Hz (draggable, 40-500)
+fx_eq_mid_freq = freemem; freemem += NUM_PADS;  // EQ mid frequency Hz (draggable, 200-8000)
+fx_eq_hi_freq  = freemem; freemem += NUM_PADS;  // EQ high frequency Hz (draggable, 2000-16000)
+fx_sat_drv  = freemem; freemem += NUM_PADS;  // Saturation drive (0–1)
+fx_drv_mode = freemem; freemem += NUM_PADS;  // Drive mode: 0=SOFT 1=TUBE 2=TAPE 3=FUZZ 4=CLIP
+fx_bc_rate  = freemem; freemem += NUM_PADS;  // Bitcrush rate reduction (0=off, 1=max crush)
+fx_bc_bits  = freemem; freemem += NUM_PADS;  // Bitcrush bit depth (16=clean, 1=destroyed)
+fx_snd_dly  = freemem; freemem += NUM_PADS;  // Per-pad delay send amount (0–1)
+fx_snd_rvb  = freemem; freemem += NUM_PADS;  // Per-pad reverb send amount (0–1)
+fx_cmp_amt  = freemem; freemem += NUM_PADS;  // Per-pad compressor amount/mix (0=off, 1=full)
+fx_cmp_mode = freemem; freemem += NUM_PADS;  // Comp mode: 0=PUNCH 1=GLUE 2=SQUASH
+fx_reso     = freemem; freemem += NUM_PADS;  // Per-pad filter resonance Q (0.707–12)
+
+// Per-pad FX filter state (stereo — used by gap-flush)
+fx_hpf_stL  = freemem; freemem += NUM_PADS;  // HPF LP-state left
+fx_hpf_stR  = freemem; freemem += NUM_PADS;  // HPF LP-state right
+fx_lpf_stL  = freemem; freemem += NUM_PADS;  // LPF state left
+fx_lpf_stR  = freemem; freemem += NUM_PADS;  // LPF state right
+fx_bc_cnt    = freemem; freemem += NUM_PADS; // Bitcrush hold counter
+fx_bc_holdL  = freemem; freemem += NUM_PADS; // Bitcrush held sample L
+fx_bc_holdR  = freemem; freemem += NUM_PADS; // Bitcrush held sample R
+fx_bc_lvl    = freemem; freemem += NUM_PADS; // Precomputed quantization levels
+
+// Per-pad compressor runtime state
+fx_cmp_env      = freemem; freemem += NUM_PADS;  // Envelope follower state
+fx_cmp_last_gr  = freemem; freemem += NUM_PADS;  // Cached GR (dB)
+fx_cmp_last_lin = freemem; freemem += NUM_PADS;  // Cached linear gain
+
+// Per-pad compressor precomputed coefficients (set in recalc_fx → recalc_pad_comp)
+fx_cmp_at_c       = freemem; freemem += NUM_PADS;  // Attack envelope coeff
+fx_cmp_rel_c      = freemem; freemem += NUM_PADS;  // Release envelope coeff
+fx_cmp_inv_ratio  = freemem; freemem += NUM_PADS;  // 1/ratio
+fx_cmp_thresh     = freemem; freemem += NUM_PADS;  // Threshold dB
+fx_cmp_knee_lo    = freemem; freemem += NUM_PADS;  // Knee lower bound dB
+fx_cmp_knee_hi    = freemem; freemem += NUM_PADS;  // Knee upper bound dB
+fx_cmp_knee_inv   = freemem; freemem += NUM_PADS;  // 1/(2*knee)
+fx_cmp_knee_lo_lin = freemem; freemem += NUM_PADS; // Linear fast-path threshold
+fx_cmp_makeup_lin = freemem; freemem += NUM_PADS;  // Auto-makeup gain (linear)
+
+// Per-pad biquad filters: HPF + LPF + low shelf + mid peak + high shelf = 5 per pad
+BQ_PER_PAD   = 5;
+bq_pad       = freemem; freemem += NUM_PADS * BQ_PER_PAD * BQ_STEREO_SIZE;
+// Offsets within per-pad biquad block
+BQ_PAD_HPF   = 0;
+BQ_PAD_LPF   = 1;
+BQ_PAD_LO    = 2;
+BQ_PAD_MID   = 3;
+BQ_PAD_HI    = 4;
+
+// Master biquad filters: HPF + LPF + low shelf + mid peak + high shelf = 5
+bq_master    = freemem; freemem += 5 * BQ_STEREO_SIZE;
+BQ_MST_HPF   = 0;
+BQ_MST_LPF   = 1;
+BQ_MST_LO    = 2;
+BQ_MST_MID   = 3;
+BQ_MST_HI    = 4;
+
+// Per-pad stereo accumulators (summed each sample, cleared each sample)
+pad_accL    = freemem; freemem += NUM_PADS;
+pad_accR    = freemem; freemem += NUM_PADS;
+
+// FX knob memory: 12 knobs per pad (HPF/LPF/EQ_LO/EQ_MID/EQ_HI/SAT/BC_RATE/BC_BITS/DLY_SND/RVB_SND/CMP)
+KM_FX_PER_PAD = 12;
+km_fx       = freemem; freemem += NUM_PADS * KM_FX_PER_PAD * KS;
+
+// ─── Global FX knob memory (3 knobs: HPF, LPF, SAT) ────────────────────
+km_gfx_hpf  = freemem; freemem += KS;
+km_gfx_lpf  = freemem; freemem += KS;
+km_gfx_sat  = freemem; freemem += KS;
+
+// ─── Global delay/reverb knob memory ────────────────────────────────────
+// Delay: 4 knobs (DIV, FB, HPF, LPF)  Reverb: 3 knobs (SIZE, DAMP, WIDTH)
+km_dly      = freemem; freemem += 4 * KS;
+km_rvb      = freemem; freemem += 3 * KS;
+
+// ─── Master EQ + Limiter knob memory ──────────────────────────────────
+km_eq_lo    = freemem; freemem += KS;
+km_eq_mid   = freemem; freemem += KS;
+km_eq_hi    = freemem; freemem += KS;
+km_lim_thr  = freemem; freemem += KS;
+km_lim_rel  = freemem; freemem += KS;
+
+// ─── Master VOL knob memory ──────────────────────────────────────────
+km_master_vol = freemem; freemem += KS;
+
+// ─── Send bus accumulators (cleared each sample) ────────────────────────
+snd_dly_accL = freemem; freemem += 1;
+snd_dly_accR = freemem; freemem += 1;
+snd_rvb_accL = freemem; freemem += 1;
+snd_rvb_accR = freemem; freemem += 1;
+
+// GUI state arrays (must be before audio buffers to avoid overlap)
+pad_flash   = freemem; freemem += NUM_PADS;
+pad_meterL  = freemem; freemem += NUM_PADS;  // per-pad peak level meters (L)
+pad_meterR  = freemem; freemem += NUM_PADS;  // per-pad peak level meters (R)
+pc          = freemem; freemem += NUM_PADS;
+
+// LCD bar (knob memory)
+freemem = swing_lcd_init(freemem);
+
+// Color system (pre-computed RGBA)
+freemem = swing_color_init(freemem);
+
+// Selection state
+sel_pad = 0;
+
+// Anti-pop crossfade: stores last output per channel for smooth transitions
+_xf_prev    = freemem; freemem += 32;  // previous output values (up to 32 channels)
+
+// Audio buffers
+s_audio_start = freemem;
+// freemem += NUM_PADS * SLOT_SIZE;  -- do not advance; REAPER manages rest
+
+// ─── Init per-pad defaults ────────────────────────────────────────────────
+i = 0; loop(NUM_PADS,
+  p_gain[i]    = 1.0;
+  p_pan[i]     = 0.0;
+  p_panL[i]    = 1.0;
+  p_panR[i]    = 1.0;
+  p_tune[i]    = 0.0;
+  p_attack[i]  = 0.5;   // near-instant for drums, minimal click
+  p_decay[i]   = 2000;  // max decay — let the full sample ring out
+  p_sustain[i] = 1.0;   // full sustain — sample plays through
+  p_release[i] = 250;   // smooth release, avoids abrupt cutoff
+  p_adsr_user[i] = 0;   // 0 = ADSR is auto-derived; flips to 1 when user touches knob/drag
+  p_mute[i]    = 0;
+  p_solo[i]    = 0;
+  p_note[i]    = root_note + i;
+  p_output[i]  = 0;
+  p_note_lock[i] = 0;
+  s_len[i]     = 0;
+  s_start[i]   = 0;
+  s_end[i]     = 1.0;
+  s_skip[i]    = 0;
+  s_norm[i]    = 0;
+  s_norm_gain[i] = 1.0;
+  s_dirty[i]   = 1;
+  s_sr[i]      = 0;    // 0 = no sample loaded / unknown SR
+  p_color[i]   = i / 16.0;  // default: evenly-spaced hues around the wheel
+  p_choke[i]   = 0;    // no choke group
+  p_oneshot[i] = -1;   // -1 = follow global one-shot setting
+  p_reverse[i] = 0;    // forward playback
+  p_swapLR[i]  = 0;    // L↔R off (mono samples and most stereo files don't need it)
+  p_layer_cnt[i] = 0;   // 0 = legacy single-layer mode (uses s_len/s_start/s_end directly)
+  p_layer_mode[i] = 3;  // sum
+  p_rr_idx[i] = 0;
+  p_sum_tight[i] = 0;   // 0.0 = tight (no offset)
+  p_rpt_div[i] = 0;     // 0 = OFF (follow global)
+  p_rpt_ctr[i] = 0;
+  p_rpt_swph[i] = 0;
+  // FX defaults
+  fx_hpf_freq[i] = 20;     // HPF off (below audible)
+  fx_lpf_freq[i] = 20000;  // LPF off (above audible)
+  fx_eq_lo[i]    = 0;      // EQ flat
+  fx_eq_mid[i]   = 0;
+  fx_eq_hi[i]    = 0;
+  fx_eq_lo_freq[i]  = 200;    // EQ low frequency default
+  fx_eq_mid_freq[i] = 1000;   // EQ mid frequency default
+  fx_eq_hi_freq[i]  = 5000;   // EQ high frequency default
+  fx_sat_drv[i]  = 0;      // saturation off
+  fx_drv_mode[i] = 0;      // drive mode: SOFT (default)
+  fx_bc_rate[i]  = 0;      // bitcrush rate: 0 = off
+  fx_bc_bits[i]  = 16;     // bitcrush depth: 16 = clean
+  fx_snd_dly[i]  = 0;      // delay send: 0 = off
+  fx_snd_rvb[i]  = 0;      // reverb send: 0 = off
+  fx_cmp_amt[i]  = 0;      // compressor off
+  fx_cmp_mode[i] = 0;      // default PUNCH
+  fx_reso[i]     = 0.707;  // Butterworth Q (flat response)
+  // FX filter state init
+  fx_hpf_stL[i] = 0; fx_hpf_stR[i] = 0;
+  fx_bc_cnt[i] = 0; fx_bc_holdL[i] = 0; fx_bc_holdR[i] = 0; fx_bc_lvl[i] = 32768;
+  fx_lpf_stL[i] = 0; fx_lpf_stR[i] = 0;
+  fx_cmp_env[i] = 0; fx_cmp_last_gr[i] = 0; fx_cmp_last_lin[i] = 1.0;
+  i += 1;
+);
+
+// Init per-layer metadata
+i = 0; loop(NUM_PADS,
+  li = 0; loop(MAX_LAYERS,
+    _lidx = i * MAX_LAYERS + li;
+    l_len[_lidx] = 0;
+    l_start[_lidx] = 0;
+    l_end[_lidx] = 1.0;
+    l_sr[_lidx] = 0;
+    l_norm[_lidx] = 0;
+    l_norm_gain[_lidx] = 1.0;
+    l_vel_lo[_lidx] = li / MAX_LAYERS;        // default: even split
+    l_vel_hi[_lidx] = (li + 1) / MAX_LAYERS;  // L1=0-0.25, L2=0.25-0.5, etc.
+    l_rr_order[_lidx] = li;                    // default: L1→L2→L3→L4
+    l_gain[_lidx] = 1.0;                        // unity gain
+    strcpy(LPATH_STR_BASE + _lidx, "");         // init layer path string
+    li += 1;
+  );
+  i += 1;
+);
+
+i = 0; loop(MAX_VOICES + 1, v_pos[i] = -1; v_slot[i] = 0; v_stage[i] = 0; v_layer[i] = 0; i += 1;);
+memset(pad_flash, 0, NUM_PADS);
+memset(p_peak, 0, NUM_PADS);
+memset(p_peak_hold, 0, NUM_PADS);
+
+memset(p_held, 0, NUM_PADS);
+memset(p_held_vel, 0, NUM_PADS);
+memset(_retrig_cd, 0, NUM_PADS);
+memset(km_pad_vol_pan, 0, NUM_PADS * KM_PAD_MINI * KS);
+
+// Precomputed steal ramp (5ms fast fade) — computed once at init, valid for session
+steal_coeff = exp(-1.0 / max(1, 0.005 * srate));
+// Precomputed smoothing coefficients (sample-rate-independent)
+_pad_meter_decay = exp(-1.0 / max(1, 0.090 * srate));   // ~90ms pad meter fall
+_mst_meter_decay = exp(-1.0 / max(1, 0.450 * srate));   // ~450ms master meter fall
+_sm_coeff = 1.0 - exp(-1.0 / max(1, 0.0045 * srate));   // ~4.5ms (sat drive + master vol)
+last_srate = srate;
+
+_prev_play_state = 0;  // transport state tracker for retrigger reset
+_transport_grace = 0;  // note-off suppression counter after transport start
+_xf_active = 0;           // anti-pop crossfade: not active until deserialize
+_xf_pos = 0;
+_xf_len = 1;
+memset(_xf_prev, 0, 32);  // no previous output at init
+_coll_last_check = time_precise();  // avoid spurious reconciliation on first @block
+
+// ─── GUI state ────────────────────────────────────────────────────────────
+overlay_pad  = -1;   // which pad has overlay open (-1 = none)
+tau = 2 * $pi;       // constant for arc/knob drawing
+overlay_layer = 0;   // which layer is being displayed in overlay
+active_id    = -1;
+prev_LMB     = 0;
+prev_RMB     = 0;
+last_mouse_cap = 0;
+gfx_frame_count = 0;
+frame_last_timer = 0;
+any_solo     = 0;
+// Apply factory defaults for serialized vars (see rk_swing_defaults.jsfx-inc).
+// ext_noinit=1.0 makes @init one-shot per instance — @serialize overwrites
+// these on project load; old presets backfill via `is_read && ser_ver < N`.
+swing_apply_defaults_modes();
+swing_apply_defaults_fx();
+midi_learn_pad = -1; // pad waiting for MIDI learn (-1 = off)
+gui_held_pad   = -1; // pad held by mouse click (-1 = none)
+drag_src_pad   = -1; // source pad for drag-swap (-1 = no drag)
+drag_active    = 0;  // 1 = currently dragging a pad
+drag_start_x   = 0;  // mouse x at drag start
+drag_start_y   = 0;  // mouse y at drag start
+rpt_counter  = 0;    // sample counter for repeat timing
+rpt_swing_phase = 0; // alternates 0/1 each repeat tick
+// ─── Master output meter state ──────────────────────────────────────────
+master_meterL = 0; master_meterR = 0;
+master_gr_meter = 1.0;  // gain reduction meter for limiter
+
+// ─── Jog wheel state ─────────────────────────────────────────────────────
+// ─── Waveform zoom state ────────────────────────────────────────────────
+wf_zoom     = 1.0;  // 1.0 = full view, 2.0 = 2x zoom, etc.
+wf_scroll   = 0.0;  // normalized scroll position (0–1) within zoomed view
+wf_snap_zc  = 1;    // 1 = snap trim markers to zero crossings
+
+// Double-click tracking for LCD and overlay nodes
+_dbl_click_time = 0;
+_dbl_click_id = -1;
+// Double-click tracking for MIX tab sliders
+_mix_dbl_time = 0;
+_mix_dbl_id = -1;
+// ─── Kit Export/Import state machine ──────────────────────────────────────
+// gmem layout constants
+KIT_GMEM_CMD         = 0;     // command flag
+KIT_GMEM_VER         = 1;     // format version (kit-import protocol)
+KIT_GMEM_PARAM1      = 1;     // generic CMD parameter (e.g. pad index for
+                              // CMD 50/51 rename). Same slot as
+                              // KIT_GMEM_VER — they're polymorphic by
+                              // protocol: KIT_GMEM_VER during kit-import
+                              // (CMD 3), KIT_GMEM_PARAM1 elsewhere. The
+                              // LOCK + CMD ordering guarantees the two
+                              // uses never overlap in time.
+KIT_GMEM_NPADS       = 2;     // number of pads
+KIT_GMEM_NAMELEN     = 3;     // kit name length
+KIT_GMEM_NAME        = 4;     // kit name chars (32 max)
+KIT_GMEM_GLOBALS     = 40;    // global settings (slots 40–89)
+KIT_GMEM_META        = 100;   // pad metadata (80 per pad)
+KIT_GMEM_META_PP     = 80;    // floats per pad in metadata
+KIT_GMEM_PADNAMES    = 1720;  // pad name strings (32 chars per pad, 1720–2231)
+KIT_GMEM_PADNAME_LEN = 32;
+GS_PAD_OFFSET_BASE   = 2232;  // per-pad sample offset (16 floats, 2232–2247)
+KIT_GMEM_AUDIOLEN    = 2256;  // audio length per pad (16 entries)
+KIT_GMEM_AUDIO       = 3000;  // audio data start
+KIT_GMEM_BRIDGE_ALIVE = 99;   // Lua bridge heartbeat (unix timestamp)
+KIT_GMEM_UNDO_ACK    = 95;    // bridge → JSFX: undo block is open (1=ready)
+KIT_GMEM_UNDO_DESC   = 96;    // undo description ID (read by Lua bridge CMD 46)
+KIT_GMEM_LOCK        = 97;    // instance lock (0=free, instance_id=locked)
+KIT_GMEM_INSTANCE    = 98;    // instance_id of requesting JSFX
+KIT_GMEM_INSTANCE_NEXT = 94;  // monotonic counter for new instance_id allocation
+                              // (replaces time_precise() which had a 10µs collision window)
+KIT_COPY_CHUNK       = 200000; // samples per frame during audio copy
+
+// v2.1 gmem constants (1380–1499 gap, after META region)
+GS_BROWSER_OPEN   = 1382;
+GS_KIT_NAME_BASE  = 1383;    // 16 chars (1383–1398)
+GS_PAD_BPM_BASE   = 1400;    // 16 floats (1400–1415)
+GS_PAD_KEY_BASE   = 1416;    // 16 ints (1416–1431)
+GS_COL_EFFECTIVE_S = 1432;   // effective saturation = theme S × intensity
+GS_COL_EFFECTIVE_L = 1433;   // effective lightness  = theme L
+GS_AUDIO_REPAIR_REQ = 1434;  // JSFX → bridge: instance_id needs sidecar reload (audio truncated by chunk size limit on Undo/chunk restore); 0 = no request
+GS_WINDOW_W       = 1435;
+GS_WINDOW_H       = 1436;
+GS_BROWSE_PAD     = 1437;
+GS_BROWSER_PATH_LEN = 1439;   // browser sample path length (chars)
+GS_BROWSE_LAYER   = 1441;     // layer index for CMD 64 (browser layer load)
+GS_PAD_SELECT_REQ = 1440;     // browser → JSFX: pad selection request (-1 = none)
+GS_TRACK_NUM      = 1442;     // bridge → browser: 1-based track number of Swing instance
+GS_TARGET_FX_IDX  = 1438;     // bridge → browser: 0-based FX-chain index, disambiguates stacked Swings on the same track (note: 1438 was previously unused — slot between BROWSE_PAD and PATH_LEN)
+GS_PAD_TRIGGER    = 1443;     // browser → JSFX: trigger pad playback (-1 = none)
+GS_KIT_LOAD_REQ   = 1444;     // browser kit load: 0=idle, 1=request, 2=data ready
+gmem[GS_PAD_SELECT_REQ] = -1;  // no pending pad selection from browser
+gmem[GS_PAD_TRIGGER]    = -1;  // no pending pad trigger from browser
+GS_BROWSER_PATH   = 1450;     // browser sample path chars (260 max: 1450–1709)
+GS_BROWSER_PATH_MAX = 260;
+GS_COMPANION_CMD  = 1710;     // companion script command (0=idle, 3=toggle lock, 4=new kit)
+
+// Companion / update system
+GS_SWING_ALIVE      = 1711;     // heartbeat counter (Lua detects changes)
+GS_UPDATE_REQUEST   = 1712;     // JSFX → Lua: 1=check now, 2=open download URL
+GS_UPDATE_STATE     = 1713;     // Lua → JSFX: 0=idle, 1=checking, 3=update available
+GS_LATEST_VER_BASE  = 1714;     // 5 chars: 1714–1718
+GS_MEDIA_EXPLORER_OPEN = 1719;  // bridge → JSFX: 1 if REAPER Media Explorer is open
+
+// Undo/redo button state (bridge polls REAPER's Undo_CanUndo2/CanRedo2
+// and publishes here; JSFX reads for tooltip display + button enable).
+GS_UNDO_DESC      = 2276;       // 128-char string: next-undo description
+GS_UNDO_DESC_LEN  = 128;
+GS_REDO_DESC      = 2406;       // 128-char string: next-redo description
+GS_REDO_DESC_LEN  = 128;
+GS_UNDO_AVAIL     = 2536;       // 1 = undo available, 0 = stack empty
+GS_REDO_AVAIL     = 2537;       // 1 = redo available, 0 = stack empty
+
+// Live per-pad effective-mute state (mute OR (any_solo && !solo)). JSFX
+// writes from @gfx every frame; browser reads to dim muted pads. 16 slots,
+// one per pad: 1 = muted-effective, 0 = audible.
+GS_PAD_MUTED_BASE = 2538;       // 2538..2553
+
+// Pending kit-load target — set by the requesting instance when firing
+// CMD 22, so the GS_KIT_LOAD_REQ=2 receive handler routes the kit data
+// only to that instance. Decoupled from KIT_GMEM_INSTANCE (browser
+// target) so an auto-load on a freshly-inserted instance can't hijack
+// the user's browser-target pick.
+GS_PENDING_LOAD_INST = 2554;
+
+// ─── Instance Registry ────────────────────────────────────────────────
+// Each Swing instance owns a slot here, written EVERY @block. Two
+// purposes: (1) fresh instances detect inst_id collisions at @init by
+// checking who's already registered with a recent heartbeat — fixes the
+// FX-duplicate case where slider4 carries over from the source. (2) The
+// browser reads this list to know which Swings are alive, then does its
+// own one-shot track scan to map inst_id → track/fx for display.
+//
+// JSFX cannot query its own track number or FX-chain index, so those
+// stay browser-side. The registry holds only data the JSFX itself can
+// produce: id, heartbeat, and self-reported display fields.
+//
+// Layout: 16 slots × 4 floats = 64 floats (2556..2619)
+//   +0  inst_id    (slider4 of the owning instance)
+//   +1  heartbeat  (time_precise() — staleness detection)
+//   +2  pad_count  (count of pads with audio — display)
+//   +3  kit_hash   (cheap kit-name hash — display refresh trigger)
+GS_INST_REG_BASE   = 2556;
+GS_INST_REG_STRIDE = 4;
+GS_INST_REG_MAX    = 16;
+GS_INST_REG_TIMEOUT = 3.0;   // seconds — slots silent longer than this are reused
+
+// ─── Per-pad action channel (browser → JSFX) ────────────────────────────
+// Used by the browser's right-click menu + note dropdown to drive per-pad
+// state changes from outside the JSFX UI. Only the browser-target instance
+// acts on these.
+//   GS_PAD_ACTION_TARGET: -1 = idle, 0..15 = pad to act on (consumed after use)
+//   GS_PAD_ACTION_CODE:   1=mute toggle, 2=solo toggle, 3=reverse toggle,
+//                         4=set note (value = MIDI note 0..127),
+//                         5=set output (value = output 0..15)
+//   GS_PAD_ACTION_VALUE:  depends on code
+GS_PAD_ACTION_TARGET = 2620;
+GS_PAD_ACTION_CODE   = 2621;
+GS_PAD_ACTION_VALUE  = 2622;
+gmem[GS_PAD_ACTION_TARGET] = -1;  // start idle (each instance writes once at init — last-writer-wins is fine)
+
+// JSFX → bridge: select the multi-out child track for this pad in REAPER's
+// TCP/MCP. Value: 1-indexed pad (1..16); 0 = no request. Bridge consumes by
+// writing 0 back. Gated in JSFX by the pad_click_selects_track preference
+// (serialized at ser_ver >= 41, default 0 = off — opt-in via Colors menu).
+GS_PAD_TRACK_SELECT  = 2623;
+gmem[GS_PAD_TRACK_SELECT] = 0;
+
+// Swing_Browser.lua → JSFX: set to 1 when the user clicked BROWSE but
+// ReaImGui isn't installed. JSFX shows a banner overlay in the LCD area
+// (same overlay path as kit_bridge_warn). Cleared back to 0 by the browser
+// on a successful launch (i.e. after the user installs ReaImGui and tries
+// again). Persists across instances within a REAPER session.
+GS_REAIMGUI_MISSING  = 2624;
+
+heartbeat_counter    = 0;
+// _auto_load_attempted: serialized at ser_ver >= 36, so DO NOT initialize
+// here. EEL2 zeros uninitialized variables on fresh-instance creation,
+// which is the value we want for "auto-load 808 has not yet fired".
+// Resetting to 0 in @init would re-fire auto-load on every sample-rate
+// change (which re-runs @init but not @serialize) — clobbering whatever
+// kit the user has currently loaded.
+update_dot_alpha     = 0;
+update_dot_dir       = 1;
+
+gmem[GS_UPDATE_REQUEST] = 1;    // ask companion to check on first load
+
+kit_export_state = 0;  // 0=idle 1=ask_name 10=wait_name 11=write_meta 2=copy_audio 3=wait_lua
+kit_import_state = 0;  // 0=idle 1=wait_lua 2=read_meta 3=copy_audio 4=recalc
+kit_bridge_warn  = 0;  // 1 = show "bridge not running" warning
+// Undo queue: defer destructive actions until bridge opens undo block.
+// Codes:
+//   0  = none / idle
+//   1  = clear all pads
+//   2  = clear pad
+//   3  = clear layer
+//   5  = swap pads
+//   6  = new kit (full reset)
+// (Codes 8-11 reserved for the v2 internal undo system. Drag-drop and
+// browser-load currently run synchronously and rely on the bridge's
+// leak-timer to close the undo block — full audio-buffer restore is
+// pending the v2 rewrite.)
+_undo_pending = 0;
+_undo_pad = -1;         // target pad for pending action
+_undo_pad2 = -1;        // second pad (for swap)
+_undo_layer = -1;       // target layer (for clear layer)
+kit_copy_pad    = 0;
+kit_copy_layer  = 0;
+kit_copy_pos    = 0;
+kit_audio_off   = 0;   // running gmem offset for audio
+kit_total_audio = 0;   // total samples to copy (for progress)
+kit_copied_audio = 0;  // samples copied so far (for progress)
+strcpy(#kit_name, "");
+kit_name_gmem_dirty = 1; // sync to gmem on first frame
+audiolen_gmem_dirty = 1; // sync pad audio lengths to gmem on first frame
+pad_colors_gmem_dirty = 1; // sync pad colors to gmem on first frame
+pad_names_gmem_dirty = 1;  // sync pad names to gmem on first frame
+kit_busy = 0;          // 1 during export/import (blocks other interaction)
+// embed_show_knobs: serialized at ser_ver >= 33; same reasoning as
+// _auto_load_attempted above — EEL2 default 0 is "knobs hidden", which
+// is the same as the legacy default. Initializing in @init would reset
+// the user's preference on every sample-rate change.
+
+// Precomputed coefficients
+_sat_drv_sm = 0;  // smoothed master drive amount (chases gfx_sat_drv)
+_vol_sm = 1.0;    // smoothed master volume (chases global_vol, prevents zipper)
+// global_vol is the LINEAR amplitude derived from the master_db slider
+// in @slider. Init here so fresh instances (before any @slider fires)
+// don't multiply audio by 0. Default master_db = 0 dB → unity = 1.0.
+global_vol = 1.0;
+
+// Filter state (stereo)
+gfx_hpf_stL = 0; gfx_hpf_stR = 0;
+gfx_lpf_stL = 0; gfx_lpf_stR = 0;
+
+// ─── Master limiter runtime state (params set by swing_apply_defaults_fx) ──
+gfx_lim_rel_c = exp(-1.0 / max(1, gfx_lim_rel * 0.001 * srate));
+gfx_lim_env   = 1.0;      // current gain envelope (1.0 = no reduction)
+gfx_lim_gr    = 1.0;      // GR meter (min of frame, reset in @gfx)
+
+// Init master biquad filters
+recalc_global_fx();
+
+// ─── Global send FX: Delay + Reverb + Compressor ────────────────────────
+// Params set by swing_apply_defaults_fx() above; @serialize backfills old
+// presets via `is_read && ser_ver < N` clauses.
+
+// Init delay + reverb + compressor buffers (placed after s_audio_start in high memory)
+// Each _init returns the next free memory address
+_send_fx_mem = s_audio_start + NUM_PADS * SLOT_SIZE;
+_send_fx_mem = dly_init(_send_fx_mem);
+_send_fx_mem = rvb_init(_send_fx_mem);
+_send_fx_mem = cmp_init(_send_fx_mem);
+dly_recalc();
+rvb_recalc();
+cmp_recalc();
+
+// Temp buffer for pad swap (max SLOT_SIZE, placed after FX memory)
+_swap_tmp_buf = _send_fx_mem;
+_send_fx_mem += SLOT_SIZE;
+
+// ─── Pad colors: HSL hue system ──────────────────────────────────────────
+// p_color[i] = hue (0.0–1.0), rendered with fixed S=0.75, L=0.55
+// pc[] array kept for v16→v17 migration (maps old palette index → hue)
+PAD_COLOR_S = 0.75;  // saturation for pad face colors
+PAD_COLOR_L = 0.55;  // lightness for pad face colors
+
+// Legacy palette → hue mapping (for deserialize migration)
+// Index:  0=red  1=orange  2=yellow  3=green  4=teal  5=blue
+//         6=indigo 7=purple 8=magenta 9=crimson 10=brown
+//         11=sage 12=slate 13=gold 14=violet 15=cyan
+pc[0]=0.00;   // red
+pc[1]=0.07;   // orange
+pc[2]=0.14;   // yellow
+pc[3]=0.33;   // green
+pc[4]=0.47;   // teal
+pc[5]=0.58;   // blue
+pc[6]=0.67;   // indigo
+pc[7]=0.78;   // purple
+pc[8]=0.89;   // magenta
+pc[9]=0.97;   // crimson
+pc[10]=0.08;  // brown
+pc[11]=0.38;  // sage
+pc[12]=0.60;  // slate blue
+pc[13]=0.12;  // gold
+pc[14]=0.75;  // violet
+pc[15]=0.52;  // cyan
+
+// Core functions now in rk_swing_core.jsfx-inc:
+//   get_name_slot, get_path_slot, get_cname_slot, auto_name_from_file,
+//   sync_note_names, clear_layer, clear_pad, load_from_path,
+//   load_layer_from_path, build_wv_cache, launch_voices_for_pad
+
+// Init custom name strings to empty (must be after get_cname_slot definition)
+i = 0; loop(NUM_PADS, strcpy(get_cname_slot(i), ""); i += 1;);
+
+// ─── Build 128-note menu string (flat list, no submenus) ────────────────
+// gfx_showmenu returns 1-based index matching item order exactly.
+// Flat list: item 1 = MIDI note 0, item 128 = MIDI note 127.
+strcpy(#note_menu, "");
+_nmi = 0;
+loop(128,
+  _nms = _nmi % 12;
+  _oct = (_nmi / 12)|0 - 1;
+  _nms==0?strcpy(#_nm_tmp,"C"):_nms==1?strcpy(#_nm_tmp,"C#"):
+  _nms==2?strcpy(#_nm_tmp,"D"):_nms==3?strcpy(#_nm_tmp,"D#"):
+  _nms==4?strcpy(#_nm_tmp,"E"):_nms==5?strcpy(#_nm_tmp,"F"):
+  _nms==6?strcpy(#_nm_tmp,"F#"):_nms==7?strcpy(#_nm_tmp,"G"):
+  _nms==8?strcpy(#_nm_tmp,"G#"):_nms==9?strcpy(#_nm_tmp,"A"):
+  _nms==10?strcpy(#_nm_tmp,"A#"):strcpy(#_nm_tmp,"B");
+  _nmi > 0 ? strcat(#note_menu, "|");
+  sprintf(#_nm_entry, "%s%d (%d)", #_nm_tmp, _oct, _nmi);
+  strcat(#note_menu, #_nm_entry);
+  _nmi += 1;
+);
+
+// DSP functions defined in rk_drumkit_dsp.jsfx-inc:
+//   freq_to_norm, norm_to_freq, apply_vel_curve, get_rpt_interval,
+//   recalc_pad, recalc_fx, recalc_global_fx
+
+// ─── Init DSP coefficients ──────────────────────────────────────────────
+i = 0; loop(NUM_PADS, recalc_pad(i); i += 1;);
+i = 0; loop(NUM_PADS, recalc_fx(i); i += 1;);
+_last_root = root_note;
+_last_gvol = global_vol;
+
+// Pre-render col_rgba so the pad face has valid colors from frame 0.
+// Without this, an FX window opened before the first @gfx tick (or
+// before col_dirty=1 from @serialize triggers a rebuild) showed pads
+// as dark gray (col_rgba zeroed by swing_color_init's memset). The
+// chunk reload still sets col_dirty=1 in @serialize, so the next
+// @gfx tick will re-render with saved kit values; this is just the
+// safety floor.
+swing_color_rebuild();
+
+// ─── Slider recalc ────────────────────────────────────────────────────────
+@slider
+// Convert master_db (slider unit: dB, range -60..+12) to global_vol
+// (linear amplitude, used directly in @sample). exp(x * 0.11512925465) =
+// pow(10, x / 20) — EEL has no log10/pow10 so we use the ln equivalent.
+// At -60 dB or below, snap to true silence (otherwise we leak ~1e-3 amp).
+global_vol = master_db <= -60 ? 0 : exp(master_db * 0.11512925465);
+
+// Only do full recalc when root_note or global_vol actually change.
+// slider3 (changed flag) is toggled by every UI interaction — running
+// recalc_pad × 16 + recalc_fx × 16 on each one tanks the frame rate.
+// Per-pad callers already call recalc_pad(i) themselves.
+root_note != _last_root || global_vol != _last_gvol ? (
+  i = 0; loop(NUM_PADS, recalc_pad(i); recalc_fx(i); i += 1;);
+  steal_coeff = exp(-1.0 / max(1, 0.005 * srate));
+
+  recalc_global_fx();
+  _last_root = root_note;
+  _last_gvol = global_vol;
+);
+
+
+// ─── Block: MIDI + DSP dirty ──────────────────────────────────────────────
+@block
+// ── Audio-engine gap detector — see rk_swing_block.jsfx-inc ──
+swing_block_gap_flush();
+
+// Detect sample-rate change and recompute coefficients
+swing_block_handle_srate_change();
+// Lazy FX recalc when any tracked param drifted — see rk_swing_block.jsfx-inc
+swing_block_sync_fx_params();
+
+// Reverb block-rate LFO update
+rvb_tick();
+
+// Recompute any_solo
+any_solo = 0;
+i = 0; loop(NUM_PADS, p_solo[i] ? any_solo = 1; i += 1;);
+
+// ── Idle smoother snap ──
+// When no audio is playing, snap master-volume + saturator-drive smoothers
+// directly to their slider targets so the first hit doesn't get attenuated
+// by a 22ms _sm_coeff ramp. Without this, a fresh JSFX insert (or a render
+// that starts cold with global_vol != 1.0) plays its first kick through a
+// rising master-volume ramp — visible as a smaller transient on hit 1 in
+// the rendered waveform vs hits 2..N. Smoothers only resume during active
+// audio (voices alive or crossfade running) where the ramp prevents
+// zipper noise on live slider moves.
+voices_alive == 0 && !_xf_active ? (
+  _vol_sm     = global_vol;
+  _sat_drv_sm = gfx_sat_drv;
+);
+
+// Clear per-pad dedup flags (prevents double-triggers within the same @block)
+memset(_blk_trig, 0, NUM_PADS);
+memset(_blk_off,  0, NUM_PADS);
+
+// Decrement transport grace counter (blocks note-offs for 2 blocks after transport start)
+_transport_grace > 0 ? _transport_grace -= 1;
+
+// Reset held state on transport start (prevents stale repeats from previous playback)
+_prev_play_state != play_state && (play_state & 1) && !(_prev_play_state & 1) ? (
+  memset(p_held, 0, NUM_PADS);
+  rpt_counter = 0;
+  _transport_grace = 2;  // suppress note-offs for 2 blocks after transport start
+);
+// Release all voices on transport stop (ext_tail_size = -1 keeps DSP alive,
+// so voices in sustain/attack/decay would hold forever without this).
+_prev_play_state != play_state && !(play_state & 1) && (_prev_play_state & 1) ? (
+  memset(p_held, 0, NUM_PADS);
+  rpt_counter = 0;
+  i = 0; loop(MAX_VOICES + 1,
+    v_stage[i] > 0 && v_stage[i] < 4 ? v_stage[i] = 4;
+    i += 1;
+  );
+);
+_prev_play_state = play_state;
+
+// Retrigger lockout window for duplicate-kill inside launch_voices_for_pad.
+// Only used for voice cleanup, NOT as a note-on gate.
+_retrig_lockout = max(samplesblock * 2, (srate * 0.01)|0);
+
+while(midirecv(offset, msg1, msg2, msg3)) (
+  status = msg1 & 0xF0;
+  _midi_consumed = 0;  // track whether Swing eats this event
+  status == 0x90 && msg3 > 0 ? (
+    // MIDI learn: assign note to pad
+    midi_learn_pad >= 0 ? (
+      p_note[midi_learn_pad] = msg2;
+      p_note_lock[midi_learn_pad] = 1;
+      mark_dirty();
+      midi_learn_pad = -1;
+      _midi_consumed = 1;
+    );
+    // Find pad by note (supports custom note assignments, first match wins)
+    pad = -1;
+    i = 0; loop(NUM_PADS, pad < 0 && p_note[i] == msg2 ? pad = i; i += 1;);
+    pad >= 0 ? (
+      _midi_consumed = 1;  // this note belongs to a Swing pad — eat it
+      blocked = p_mute[pad] || (any_solo && !p_solo[pad]) || !pad_has_audio(pad) || s_skip[pad];
+      // Dedup: _blk_trig prevents same-block duplicates.
+      // Cross-block duplicates handled by duplicate-kill inside launch_voices_for_pad.
+      !blocked && !_blk_trig[pad] ? (
+        launch_voices_for_pad(pad, msg3, 8);
+        p_held[pad] = 1; p_held_vel[pad] = msg3;
+        _blk_trig[pad] = 1;
+      );
+    );
+  );
+  // Note-off: trigger release (skip for one-shot pads)
+  (status == 0x80 || (status == 0x90 && msg3 == 0)) ? (
+    // Match note to pads, clear held state, record note-off (single pass)
+    i = 0; loop(NUM_PADS,
+      p_note[i] == msg2 ? (
+        _midi_consumed = 1;
+        !_blk_trig[i] && _transport_grace == 0 ? ( p_held[i] = 0; );
+        _transport_grace == 0 ? ( _blk_off[i] = 1; );
+      );
+      i += 1;
+    );
+    // Release voices — but skip pads in one-shot mode.
+    // Also skip if:
+    //   (a) pad was triggered THIS block (_blk_trig) — prevents chase note-offs
+    //       from killing a voice just launched in the same block
+    //   (b) transport just started (_transport_grace) — REAPER may send chase
+    //       note-offs in the first 1-2 blocks after play starts
+    i = 0; loop(MAX_VOICES + 1,
+      v_note[i] == msg2 && v_stage[i] < 4 ? (
+        _eos = p_oneshot[v_slot[i]];
+        (_eos == 0 || (_eos < 0 && !oneshot_global)) && !_blk_trig[v_slot[i]] && _transport_grace == 0 ? (
+          v_stage[i] = 4;
+        );
+      );
+      i += 1;
+    );
+  );
+  // Only forward MIDI that Swing did not consume (CC, pitchbend, non-pad notes).
+  // When midi_thru (slider22) is on, forward EVERYTHING — including pad-mapped
+  // notes — so a downstream Swing on the same FX chain can layer the same hit.
+  (!_midi_consumed || midi_thru) ? midisend(offset, msg1, msg2, msg3);
+);
+
+// ─── Browser pad trigger: play pad from browser click ──────────────────
+// Gate on _is_browser_target() so a pad click in the browser fires only
+// the targeted instance — not every Swing on every track that happens to
+// be reading the same gmem slot. Without this, clicking pad 1 in the
+// browser made pad 1 fire on every Swing in the project.
+// ─── Browser per-pad actions (right-click menu + note dropdown) ────────
+// Gated by _is_browser_target() so only the picked instance reacts.
+_is_browser_target() ? (
+  _pa_target = gmem[GS_PAD_ACTION_TARGET] | 0;
+  _pa_target >= 0 && _pa_target < NUM_PADS ? (
+    _pa_code  = gmem[GS_PAD_ACTION_CODE] | 0;
+    _pa_value = gmem[GS_PAD_ACTION_VALUE];
+    _pa_code == 1 ? ( p_mute[_pa_target] = !p_mute[_pa_target]; mark_dirty_pad(_pa_target); );
+    _pa_code == 2 ? ( p_solo[_pa_target] = !p_solo[_pa_target]; mark_dirty_pad(_pa_target); );
+    _pa_code == 3 ? (
+      p_reverse[_pa_target] = !p_reverse[_pa_target];
+      recalc_pad(_pa_target); s_dirty[_pa_target] = 1;
+      mark_dirty_pad(_pa_target);
+    );
+    _pa_code == 4 ? (
+      _pa_value >= 0 && _pa_value <= 127 ? (
+        p_note[_pa_target] = _pa_value | 0;
+        p_note_lock[_pa_target] = 1;  // user explicitly assigned — don't auto-rotate
+        mark_dirty_pad(_pa_target);
+        sync_note_names();
+      );
+    );
+    _pa_code == 5 ? (
+      _pa_value >= 0 && _pa_value < 16 ? (
+        p_output[_pa_target] = _pa_value | 0;
+        mark_dirty_pad(_pa_target);
+      );
+    );
+    gmem[GS_PAD_ACTION_TARGET] = -1;  // consume
+  );
+);
+
+_is_browser_target() ? (
+  _trig_pad = gmem[GS_PAD_TRIGGER] | 0;
+  _trig_pad >= 0 && _trig_pad < NUM_PADS ? (
+    gmem[GS_PAD_TRIGGER] = -1;  // consume
+    pad_has_audio(_trig_pad) && !_blk_trig[_trig_pad] ? (
+      launch_voices_for_pad(_trig_pad, 100, 0);
+      _blk_trig[_trig_pad] = 1;
+    );
+  );
+);
+
+// ─── Deferred release: same-block note-on + note-off ────────────────────
+// If a pad got both note-on and note-off in the same block, the note-off
+// was blocked by _blk_trig (chase note-off guard). Apply it now.
+i = 0; loop(NUM_PADS,
+  _blk_trig[i] && _blk_off[i] ? (
+    p_held[i] = 0;
+    // In gate mode, release voices for this pad
+    _eos = p_oneshot[i];
+    (_eos == 0 || (_eos < 0 && !oneshot_global)) ? (
+      j = 0; loop(MAX_VOICES + 1,
+        v_slot[j] == i && v_stage[j] > 0 && v_stage[j] < 4 ? v_stage[j] = 4;
+        j += 1;
+      );
+    );
+  );
+  i += 1;
+);
+
+// ─── Note repeat (tempo-synced; global overrides per-pad) — see rk_swing_block.jsfx-inc
+swing_block_process_note_repeat();
+
+// ─── Heartbeat — Lua companion detects this counter changing ────────────
+heartbeat_counter += 1;
+heartbeat_counter > 1000000 ? heartbeat_counter = 1;
+gmem[GS_SWING_ALIVE] = heartbeat_counter;
+
+// ─── Instance registry heartbeat ────────────────────────────────────────
+// Cached slot finder: at @init _reg_my_slot is -1 (uncached). On the
+// first @block we scan the registry to find an open slot, claim it, and
+// remember the slot index. From then on we just write to the cached
+// slot every block — no scan, no per-block cost beyond a few writes.
+//
+// If our slot ever gets stolen (e.g. another instance overwrites because
+// we went silent), the next claim will pick a different free slot.
+// Worst case the user sees a tiny gap in the picker.
+_reg_my_slot < 0 ? (
+  // First @block: claim an empty/stale slot. We deliberately do NOT
+  // reclaim a slot whose id matches ours — if another instance is
+  // already there with our id (project-reload duplicate), we'd just
+  // overwrite its heartbeat and end up sharing one slot. Each instance
+  // gets its own slot; the periodic collision check below resolves
+  // duplicate-id cases by reassigning the loser.
+  _reg_now_init = time_precise();
+  _reg_si = 0;
+  loop(GS_INST_REG_MAX,
+    _reg_base = GS_INST_REG_BASE + _reg_si * GS_INST_REG_STRIDE;
+    _reg_id_check = gmem[_reg_base];
+    _reg_hb_check = gmem[_reg_base + 1];
+    (_reg_my_slot < 0 &&
+     (_reg_id_check == 0 ||
+      _reg_hb_check == 0 ||
+      (_reg_now_init - _reg_hb_check) > GS_INST_REG_TIMEOUT)) ? _reg_my_slot = _reg_si;
+    _reg_si += 1;
+  );
+);
+
+_reg_my_slot >= 0 ? (
+  _reg_base = GS_INST_REG_BASE + _reg_my_slot * GS_INST_REG_STRIDE;
+  gmem[_reg_base + 0] = instance_id;
+  gmem[_reg_base + 1] = time_precise();
+  // Self-reported display fields (cheap, recomputed every block).
+  _reg_pad_count = 0;
+  _reg_pi = 0;
+  loop(NUM_PADS,
+    pad_has_audio(_reg_pi) ? _reg_pad_count += 1;
+    _reg_pi += 1;
+  );
+  gmem[_reg_base + 2] = _reg_pad_count;
+  _reg_kn_hash = 0;
+  _reg_pi = 0;
+  loop(strlen(#kit_name),
+    _reg_kn_hash += str_getchar(#kit_name, _reg_pi);
+    _reg_pi += 1;
+  );
+  gmem[_reg_base + 3] = _reg_kn_hash;
+
+  // ─── Browser kit-name + per-pad metadata mirror ──────────────────
+  // The browser reads kit_name + per-pad notes from gmem for its title
+  // and the pad-info strip. @gfx writes most of this when the FX window
+  // is open, but when the targeted instance's window is closed @gfx
+  // doesn't run and the browser would see stale data. Mirror from
+  // @block so the browser stays in sync with the picked instance even
+  // with all FX windows closed.
+  _is_browser_target() ? (
+    // Kit name (16 chars at GS_KIT_NAME_BASE) — browser title
+    _kn_len = strlen(#kit_name);
+    _kn_i = 0;
+    loop(16,
+      gmem[GS_KIT_NAME_BASE + _kn_i] = _kn_i < _kn_len ? str_getchar(#kit_name, _kn_i) : 0;
+      _kn_i += 1;
+    );
+    // Per-pad fields the browser pad grid + info strip read every frame.
+    // Writing them all here keeps the browser perfectly in sync with the
+    // targeted instance — switch the picker, the next audio block flips
+    // the entire pad-grid display to the new instance's state.
+    _bm_pi = 0;
+    loop(NUM_PADS,
+      // p_note (META +10) — pad-info strip + Set Trigger Note menu
+      gmem[KIT_GMEM_META + _bm_pi * KIT_GMEM_META_PP + 10] = p_note[_bm_pi];
+      // Effective pad hue (META +12) — when auto-color is active the JSFX
+      // pad face uses col_auto_hue[i] (drum-type / output / folder detection),
+      // NOT the manual p_color[i]. Mirror the same source so the browser
+      // reflects auto-color changes the moment the user toggles them.
+      gmem[KIT_GMEM_META + _bm_pi * KIT_GMEM_META_PP + 12] =
+        col_auto_mode_id > 0 ? col_auto_hue[_bm_pi] : p_color[_bm_pi];
+      // audio_len — non-layered pads write the ACTUAL sample count (s_len)
+      // so the bridge can stream pad audio out of gmem for Choppa-applied
+      // pads that have no disk source. Layered pads write sentinel 1 — they
+      // always use disk-source streaming in write_kit_v4, so exact length
+      // doesn't matter, only that empty-kit detection sees a non-zero.
+      gmem[KIT_GMEM_AUDIOLEN + _bm_pi] =
+        s_len[_bm_pi] > 0 ? s_len[_bm_pi] :
+        (pad_has_audio(_bm_pi) ? 1 : 0);
+      // Effective mute (own mute OR muted-by-solo) — browser dims muted pads
+      gmem[GS_PAD_MUTED_BASE + _bm_pi] =
+        (p_mute[_bm_pi] || (any_solo && !p_solo[_bm_pi])) ? 1 : 0;
+      // Pad name (32 chars at KIT_GMEM_PADNAMES + pad*32). Only mirror
+      // when no import/rename/browser-load is in flight.
+      //   kit_busy  — the bridge is writing kit data to gmem (CMD=2 is
+      //               still active, pad names already written but CMD=3
+      //               hasn't landed yet). Without this, the mirror
+      //               clobbers kit names during the audio-write phase.
+      //   CMD 3     — bridge finished writing; import hasn't read yet.
+      //   CMD 50/51 — rename dialog in flight.
+      //   CMD 63/64 — browser sample/layer load in flight.
+      !kit_busy &&
+      gmem[KIT_GMEM_CMD] != 3 &&
+      gmem[KIT_GMEM_CMD] != 50 && gmem[KIT_GMEM_CMD] != 51 &&
+      gmem[KIT_GMEM_CMD] != 63 && gmem[KIT_GMEM_CMD] != 64 ? (
+        _bm_cn = get_cname_slot(_bm_pi);
+        _bm_cnl = strlen(_bm_cn);
+        _bm_cnl > 0 ? (
+          _bm_cj = 0;
+          loop(KIT_GMEM_PADNAME_LEN,
+            gmem[KIT_GMEM_PADNAMES + _bm_pi * KIT_GMEM_PADNAME_LEN + _bm_cj] =
+              _bm_cj < _bm_cnl ? str_getchar(_bm_cn, _bm_cj) : 0;
+            _bm_cj += 1;
+          );
+        );
+      );
+      _bm_pi += 1;
+    );
+  );
+
+  // ─── Periodic collision reconciliation (~1 Hz) ────────────────────
+  // Runs after the heartbeat write so other instances see our id.
+  // If another active slot has our exact id AND its slot index is
+  // lower than ours, we lose the tie and reassign our id from the
+  // counter. The lower-indexed instance keeps its id. Convergence:
+  // for N duplicates, takes N-1 reconciliation cycles.
+  _coll_now = time_precise();
+  (_coll_now - _coll_last_check) > 1.0 ? (
+    _coll_last_check = _coll_now;
+    _coll_other_slot = -1;
+    _coll_si = 0;
+    loop(GS_INST_REG_MAX,
+      _coll_base = GS_INST_REG_BASE + _coll_si * GS_INST_REG_STRIDE;
+      _coll_id_check = gmem[_coll_base];
+      _coll_hb_check = gmem[_coll_base + 1];
+      (_coll_si != _reg_my_slot && _coll_id_check == instance_id &&
+       _coll_hb_check > 0 &&
+       (_coll_now - _coll_hb_check) < GS_INST_REG_TIMEOUT) ? _coll_other_slot = _coll_si;
+      _coll_si += 1;
+    );
+    (_coll_other_slot >= 0 && _coll_other_slot < _reg_my_slot) ? (
+      // We're the duplicate; mint a fresh id and vacate our slot
+      gmem[KIT_GMEM_INSTANCE_NEXT] += 1;
+      slider4 = gmem[KIT_GMEM_INSTANCE_NEXT];
+      instance_id = slider4;
+      gmem[GS_INST_REG_BASE + _reg_my_slot * GS_INST_REG_STRIDE]     = 0;
+      gmem[GS_INST_REG_BASE + _reg_my_slot * GS_INST_REG_STRIDE + 1] = 0;
+      _reg_my_slot = -1;  // force re-claim on next @block
+    );
+  );
+);
+
+// ── Auto-load default 808 kit on first run (was @gfx-gated; moved to
+//    @block so it fires when the FX window is closed too). Same logic
+//    as the @gfx-side block at line ~2041 was — preserved here verbatim
+//    so collapsed FX chains on project reopen don't strand the bridge
+//    waiting for an @gfx tick that never comes.
+//    Secondary guard: skip if any pad already has audio. On hot-reload
+//    (source file change), REAPER zeros all variables before @serialize
+//    restores them — _auto_load_attempted is momentarily 0 and @block
+//    can fire in that window, clobbering the user's current kit. Checking
+//    s_len catches that case: a truly fresh instance has empty pads.
+!_auto_load_attempted && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 &&
+  gmem[KIT_GMEM_CMD] == 0 && gmem[KIT_GMEM_LOCK] == 0 ? (
+  // Bail if any pad already has audio (hot-reload guard)
+  _al_has_audio = 0;
+  _al_i = 0; loop(NUM_PADS,
+    s_len[_al_i] > 0 ? _al_has_audio = 1;
+    _al_i += 1;
+  );
+  !_al_has_audio ? (
+    gmem[KIT_GMEM_LOCK]        = instance_id;
+    gmem[GS_PENDING_LOAD_INST] = instance_id;
+    gmem[KIT_GMEM_CMD]         = 22;
+  );
+  _auto_load_attempted       = 1;
+);
+
+// ── Bridge-driven kit-load delivery gate (moved from @gfx). Fires when
+//    the bridge has staged a kit for THIS instance via Path B
+//    (drive_load_queue → load_swing_dispatch → CMD=3 + GS_KIT_LOAD_REQ=2
+//    + PENDING_LOAD_INST=instance_id) or when the user picked us via
+//    the browser. Without this in @block, project reopen with FX
+//    chains collapsed never enters kit_import_state=1 and the bridge
+//    stalls on a 30s-per-instance timeout.
+gmem[GS_KIT_LOAD_REQ] == 2 && kit_import_state == 0 && !kit_busy &&
+  (gmem[GS_PENDING_LOAD_INST] == instance_id || _is_browser_target()) ? (
+  kit_import_state = 1;
+  kit_busy = 1;
+  gmem[GS_KIT_LOAD_REQ]      = 0;
+  gmem[GS_PENDING_LOAD_INST] = 0;
+);
+
+// ── Run the kit-import state machine in @block so it runs whether the
+//    FX UI is visible or not. swing_ui_import_tick() doesn't touch
+//    gfx_* state — it's pure data shuffling (gmem reads, str_*, memset,
+//    DSP recalc, audio buffer copy). Removed from @gfx (was at line
+//    ~1987) to avoid running it on both threads concurrently — state 3
+//    has incremental kit_copy_pad/layer/pos counters that would race.
+swing_ui_import_tick();
+
+// ─── Sample: full ADSR per-voice ──────────────────────────────────────────
+@sample
+
+// ─── Anti-pop crossfade ramp after deserialize ──────────────────────────
+// Skip the ramp on first sample if there's no previous audio to fade from
+// (cold start / fresh kit load with silent prev output). Without this
+// short-circuit, the 20ms ramp 0→1 attenuates the first hit's transient
+// — symptom: first kick after kit load plays quieter than subsequent ones.
+_xf_active ? (
+  _xf_pos == 0 && abs(_xf_prev[0]) + abs(_xf_prev[1]) < 0.0001 ? (
+    _xf_active = 0;
+  ) : (
+    _xf_pos += 1;
+    _xf_pos >= _xf_len ? ( _xf_active = 0; );
+  );
+);
+
+// ─── Clear output channels ───────────────────────────────────────────────
+multi_out ? (
+  i = 0; loop(32, spl(i) = 0; i += 1;);
+) : (
+  spl(0) = 0; spl(1) = 0;
+);
+
+// ─── Clear per-pad accumulators ──────────────────────────────────────────
+memset(pad_accL, 0, NUM_PADS);
+memset(pad_accR, 0, NUM_PADS);
+
+// ─── Voice loop: sum into per-pad accumulators ──────────────────────────
+voices_alive = 0;
+vi = 0; loop(MAX_VOICES + 1,
+  // Advance waiting voices (negative v_pos = delayed start from loose sum mode)
+  v_pos[vi] < 0 && v_pos[vi] > -9999 && v_stage[vi] > 0 ? (
+    v_pos[vi] += 1;
+    // When wait expires, restore to saved start position (respects trim + reverse)
+    v_pos[vi] >= 0 ? v_pos[vi] = v_startpos[vi];
+  );
+  v_pos[vi] >= 0 && v_stage[vi] > 0 ? (
+    voices_alive += 1;
+    si    = v_slot[vi];
+    // Buffer pointer: offset by layer within slot
+    p_layer_cnt[si] > 0 ? (
+      bptr = s_audio_start + si * SLOT_SIZE + v_layer[vi] * LAYER_SIZE;
+      _lidx = si * MAX_LAYERS + v_layer[vi];
+      a_start = l_start[_lidx] * l_len[_lidx];
+      a_end = (l_end[_lidx] * l_len[_lidx]) - SILENCE_T;
+    ) : (
+      bptr = s_audio_start + si * SLOT_SIZE;
+      a_start = s_start[si] * s_len[si];
+      a_end = (s_end[si] * s_len[si]) - SILENCE_T;
+    );
+
+    // ADSR envelope
+    stage = v_stage[vi];
+    env   = v_env[vi];
+    // Safety net: force envelope to zero on first sample of a new voice.
+    // Prevents stale v_env from skipping the attack ramp (cross-thread race).
+    v_age[vi] == 0 ? env = 0;
+
+    stage == 1 ? (  // Attack
+      env = 1.0 - (1.0 - env) * p_att_c[si];
+      env >= 0.999 ? (env = 1.0; v_stage[vi] = 2;);
+    );
+    stage == 2 ? (  // Decay → sustain level
+      env = p_sustain[si] + (env - p_sustain[si]) * p_dec_c[si];
+      env = max(p_sustain[si], env);
+      env <= p_sustain[si] + 0.001 ? (env = p_sustain[si]; v_stage[vi] = 3;);
+    );
+    stage == 3 ? (  // Sustain
+      env = p_sustain[si];
+      env < 0.005 ? v_stage[vi] = 4;  // effectively silent — skip to release
+    );
+    stage == 4 ? (  // Release
+      env *= p_rel_c[si];
+      v_decay_ct[vi] += 1;
+    );
+    vi == MAX_VOICES && v_stage[vi] == 4 ? (
+      env *= steal_coeff;
+    );
+
+    v_env[vi] = env;
+
+    // Linear interpolation playback
+    idx  = v_pos[vi]|0; idx -= idx & 1;
+    frac = (v_pos[vi] - idx) * 0.5;
+    g    = v_gain[vi] * v_sg[vi] * env;
+
+    // End-of-sample fade: squared curve over last END_FADE positions.
+    // Squared (quadratic) reaches zero with zero slope — no step discontinuity.
+    v_inc[vi] >= 0 ? (
+      _remaining = a_end - v_pos[vi];
+      _remaining < END_FADE ? (
+        _fade = max(0, _remaining / END_FADE);
+        g *= _fade * _fade;  // squared: smooth approach to zero
+      );
+    ) : (
+      p_layer_cnt[si] > 0 ? (
+        _remaining = v_pos[vi] - l_start[si * MAX_LAYERS + v_layer[vi]] * l_len[si * MAX_LAYERS + v_layer[vi]];
+      ) : (
+        _remaining = v_pos[vi] - s_start[si] * s_len[si];
+      );
+      _remaining < END_FADE ? (
+        _fade = max(0, _remaining / END_FADE);
+        g *= _fade * _fade;
+      );
+    );
+
+    // Sample interpolation: cubic (Catmull-Rom) when the 4-point window fits,
+    // linear at buffer boundaries. hi_quality_interp slider gates cubic globally;
+    // future Machine Character modes (SP-1200 / MPC60 / Linn) flip it off to
+    // model the cheaper interp those drum machines actually used.
+    hi_quality_interp && idx >= ((a_start|0) + 2) && (idx + 4) < (a_end + SILENCE_T) ? (
+      // 4-point Catmull-Rom: y = 0.5 * (2*y1 + (-y0+y2)*t + (2*y0-5*y1+4*y2-y3)*t² + (-y0+3*y1-3*y2+y3)*t³)
+      _t = frac;
+      _t2 = _t * _t;
+      _t3 = _t2 * _t;
+      // L channel: indices idx-2, idx, idx+2, idx+4
+      _y0 = bptr[idx-2]; _y1 = bptr[idx];   _y2 = bptr[idx+2]; _y3 = bptr[idx+4];
+      sL = 0.5 * (2*_y1 + (-_y0+_y2)*_t + (2*_y0-5*_y1+4*_y2-_y3)*_t2 + (-_y0+3*_y1-3*_y2+_y3)*_t3);
+      // R channel: indices idx-1, idx+1, idx+3, idx+5
+      _y0 = bptr[idx-1]; _y1 = bptr[idx+1]; _y2 = bptr[idx+3]; _y3 = bptr[idx+5];
+      sR = 0.5 * (2*_y1 + (-_y0+_y2)*_t + (2*_y0-5*_y1+4*_y2-_y3)*_t2 + (-_y0+3*_y1-3*_y2+_y3)*_t3);
+    ) : (
+      // Linear fallback (boundary case + when cubic disabled)
+      sL = bptr[idx]   + (bptr[idx+2] - bptr[idx])   * frac;
+      sR = bptr[idx+1] + (bptr[idx+3] - bptr[idx+1]) * frac;
+    );
+
+    // L↔R channel swap (pre-pan, pre-FX). Useful for stereo files where
+    // the L/R were captured backwards. Reuse _t (already declared in
+    // local() for the cubic block — saves declaring another swap-temp).
+    p_swapLR[si] ? ( _t = sL; sL = sR; sR = _t; );
+
+    // Sum into per-pad accumulator (pre-pan, pre-FX)
+    pad_accL[si] += sL * g;
+    pad_accR[si] += sR * g;
+
+    v_pos[vi] += v_inc[vi];
+    v_age[vi] += 1;
+
+    // End condition
+    p_layer_cnt[si] > 0 ? (
+      _lidx = si * MAX_LAYERS + v_layer[vi];
+      a_start = l_start[_lidx] * l_len[_lidx];
+    ) : (
+      a_start = s_start[si] * s_len[si];
+    );
+    ((v_inc[vi] >= 0 && v_pos[vi] >= a_end) ||
+     (v_inc[vi] < 0 && v_pos[vi] <= a_start) ||
+     (v_stage[vi] == 4 && env < 0.005) ||
+     (vi == MAX_VOICES && env < 0.005)) ? (
+      v_pos[vi] = -1; v_env[vi] = 0; v_stage[vi] = 0;
+    );
+  );
+  vi += 1;
+);
+
+// ─── Per-pad FX chain + send accumulation + routing ─────────────────────
+// Clear send bus accumulators
+snd_dly_accL[0] = 0; snd_dly_accR[0] = 0;
+snd_rvb_accL[0] = 0; snd_rvb_accR[0] = 0;
+
+_pi = 0; loop(NUM_PADS,
+  // process_pad_fx sets _pfxL/_pfxR (post-pan output)
+  // and _pfx_sendL/_pfx_sendR (post-FX, pre-pan for sends)
+  process_pad_fx(_pi);
+
+  // Route to output bus (clamp to valid range)
+  bus_idx = multi_out ? max(0, min(15, p_output[_pi]|0)) * 2 : 0;
+  spl(bus_idx)     += _pfxL;
+  spl(bus_idx + 1) += _pfxR;
+
+  // Accumulate into send buses (pre-pan, post-FX)
+  fx_snd_dly[_pi] > 0.005 ? (
+    snd_dly_accL[0] += _pfx_sendL * fx_snd_dly[_pi];
+    snd_dly_accR[0] += _pfx_sendR * fx_snd_dly[_pi];
+  );
+  fx_snd_rvb[_pi] > 0.005 ? (
+    snd_rvb_accL[0] += _pfx_sendL * fx_snd_rvb[_pi];
+    snd_rvb_accR[0] += _pfx_sendR * fx_snd_rvb[_pi];
+  );
+
+  // Peak tracking for per-pad meters (smooth decay)
+  _absL = abs(_pfxL); _absR = abs(_pfxR);
+  _absL > pad_meterL[_pi] ? pad_meterL[_pi] = _absL : pad_meterL[_pi] *= _pad_meter_decay;
+  _absR > pad_meterR[_pi] ? pad_meterR[_pi] = _absR : pad_meterR[_pi] *= _pad_meter_decay;
+
+  _pi += 1;
+);
+
+// ─── Process send FX returns ────────────────────────────────────────────
+// Delay
+dly_div > 0 ? (
+  dly_process(snd_dly_accL[0], snd_dly_accR[0]);
+  // Denormal protection on delay tail
+  abs(dly_outL) < DENORM_THR ? dly_outL = 0;
+  abs(dly_outR) < DENORM_THR ? dly_outR = 0;
+  spl(0) += dly_outL * dly_mix;
+  spl(1) += dly_outR * dly_mix;
+);
+
+// Reverb
+rvb_size > 0.001 ? (
+  rvb_process(snd_rvb_accL[0], snd_rvb_accR[0]);
+  // Denormal protection on reverb tail
+  abs(rvb_outL) < DENORM_THR ? rvb_outL = 0;
+  abs(rvb_outR) < DENORM_THR ? rvb_outR = 0;
+  spl(0) += rvb_outL * rvb_mix;
+  spl(1) += rvb_outR * rvb_mix;
+);
+
+// ─── Global FX on main stereo bus (biquad filters) ──────────────────────
+_gL = spl(0); _gR = spl(1);
+
+!meq_bypass ? (
+  // Global HPF (2nd-order biquad)
+  gfx_hpf_freq > 25 ? (
+    _bq = bq_master + BQ_MST_HPF * BQ_STEREO_SIZE;
+    _gL = bq_process_L(_bq, _gL);
+    _gR = bq_process_R(_bq, _gR);
+  );
+
+  // Global LPF (2nd-order biquad)
+  gfx_lpf_freq < 19500 ? (
+    _bq = bq_master + BQ_MST_LPF * BQ_STEREO_SIZE;
+    _gL = bq_process_L(_bq, _gL);
+    _gR = bq_process_R(_bq, _gR);
+  );
+
+  // Global 3-band EQ: low shelf + mid peak + high shelf (biquad cascade)
+  // Always process all 3 bands — at 0 dB the biquads are unity (transparent)
+  _bq = bq_master + BQ_MST_LO * BQ_STEREO_SIZE;
+  _gL = bq_process_L(_bq, _gL);
+  _gR = bq_process_R(_bq, _gR);
+  _bq = bq_master + BQ_MST_MID * BQ_STEREO_SIZE;
+  _gL = bq_process_L(_bq, _gL);
+  _gR = bq_process_R(_bq, _gR);
+  _bq = bq_master + BQ_MST_HI * BQ_STEREO_SIZE;
+  _gL = bq_process_L(_bq, _gL);
+  _gR = bq_process_R(_bq, _gR);
+);
+
+// Global saturation (wet/dry mix — drive knob blends clean → saturated)
+_sat_drv_sm += (gfx_sat_drv - _sat_drv_sm) * _sm_coeff;
+_sat_drv_sm > 0.01 ? (
+  // Fixed 8x gain into hard tanh, then blend by drive amount
+  _satL = _gL * 8.0; _satR = _gR * 8.0;
+  _satL = _satL / (1.0 + abs(_satL));
+  _satR = _satR / (1.0 + abs(_satR));
+  _gL += (_satL - _gL) * _sat_drv_sm;
+  _gR += (_satR - _gR) * _sat_drv_sm;
+);
+
+// ─── Master compressor (after EQ + saturation, before volume + limiter) ──
+!cmp_bypass ? (
+  cmp_process(_gL, _gR);
+  _gL = cmp_outL;
+  _gR = cmp_outR;
+);
+
+// ─── Master volume (BEFORE limiter so limiter sees final level) ──────
+_vol_sm += (global_vol - _vol_sm) * _sm_coeff;
+_gL *= _vol_sm;
+_gR *= _vol_sm;
+
+// ─── Master limiter (feed-forward, instant attack, auto-release) ────────
+gfx_lim_on ? (
+  _peak = max(abs(_gL), abs(_gR));
+  _peak > gfx_lim_thr ? (
+    _lim_gain = gfx_lim_thr / _peak;
+    gfx_lim_env = min(gfx_lim_env, _lim_gain);  // instant attack
+  );
+  // Smooth release (one-pole: coeff near 1.0 = slow release)
+  // env approaches 1.0 asymptotically — can't overshoot (rel_c ∈ (0,1)).
+  gfx_lim_env += (1.0 - gfx_lim_env) * (1.0 - gfx_lim_rel_c);
+  _gL *= gfx_lim_env;
+  _gR *= gfx_lim_env;
+  // GR metering for display
+  gfx_lim_gr = min(gfx_lim_gr, gfx_lim_env);
+);
+
+spl(0) = _gL; spl(1) = _gR;
+
+// Anti-pop crossfade: blend from previous output to current output after deserialize
+_xf_active ? (
+  _xf_t = _xf_pos / _xf_len;            // 0→1 over crossfade duration
+  _xf_t = _xf_t * _xf_t * (3 - 2 * _xf_t);  // smoothstep for click-free curve
+  _xf_w = 1.0 - _xf_t;                  // weight of old signal (1→0)
+  multi_out ? (
+    i = 0; loop(32,
+      spl(i) = spl(i) * _xf_t + _xf_prev[i] * _xf_w;
+      i += 1;
+    );
+  ) : (
+    spl(0) = spl(0) * _xf_t + _xf_prev[0] * _xf_w;
+    spl(1) = spl(1) * _xf_t + _xf_prev[1] * _xf_w;
+  );
+) : (
+  // Only track output when crossfade is NOT active (freeze _xf_prev during crossfade)
+  multi_out ? (
+    i = 0; loop(32, _xf_prev[i] = spl(i); i += 1;);
+  ) : (
+    _xf_prev[0] = spl(0); _xf_prev[1] = spl(1);
+  );
+);
+
+// Master output metering (smooth peak-hold)
+_moL = abs(_gL); _moR = abs(_gR);
+_moL > master_meterL ? master_meterL = _moL : master_meterL *= _mst_meter_decay;
+_moR > master_meterR ? master_meterR = _moR : master_meterR *= _mst_meter_decay;
+
+// ─── Serialize ────────────────────────────────────────────────────────────
+@serialize
+// Version tag for forward-compat
+ser_ver = 44;
+file_var(0, ser_ver);
+file_var(0, multi_out);
+
+// ver 44: color overhaul — Folder auto-color mode removed, Rainbow
+// renumbered from slot 4→3 (4 modes total). 5 core drum type hues
+// spread across the full color wheel for maximum distinction.
+// Migration in swing_color_serialize: Folder(3)→Off, Rainbow(4)→Rainbow(3).
+
+// ver 43: color system simplified (themes + palettes removed, replaced
+// by a single MONO toggle) and tooltip on/off preference. Defaults:
+//   col_mono = 0 (full color)
+//   tooltips_enabled = 1 (tooltips visible by default for new instances)
+// Old projects (ser_ver < 43): zero-init handles col_mono correctly.
+// tooltips_enabled needs the explicit backfill below — otherwise old
+// projects would load with tooltips disabled (zero-init=0).
+ser_ver >= 43 ? file_var(0, col_mono);
+ser_ver >= 43 ? file_var(0, tooltips_enabled);
+is_read && ser_ver < 43 ? ( tooltips_enabled = 1; );
+
+// ver 41: pad-click-selects-track preference. EEL2 zeros uninitialized vars
+// on fresh insert, so a brand-new instance gets pad_click_selects_track = 0
+// (off — opt-in via Colors right-click menu).
+ser_ver >= 41 ? file_var(0, pad_click_selects_track);
+// ver 42: welcome-banner dismissal flag. EEL2 zero-init = 0 = show banner.
+// User dismisses banner with a click → flag goes to 1 → banner stays gone
+// in subsequent sessions on this instance. Per-instance so each fresh
+// insert gets its own welcome state.
+ser_ver >= 42 ? file_var(0, _welcome_dismissed);
+
+// ── Ver 40 migration: master volume scale dB ──────────────────────────────
+// Pre-40, slider2 was `global_vol` with a LINEAR amplitude range (0..2,
+// default 1.0). Felt squashed perceptually because human hearing is log.
+// In ver 40, slider2 is `master_db` with a dB range (-60..+12, default 0).
+// On read of an older project, slider2 still holds the saved AMPLITUDE
+// value (REAPER restored it into our renamed variable). Convert it once,
+// here, so the equivalent dB lands in master_db and downstream
+// (@slider → global_vol) produces the same loudness the project had.
+// 20*log10(x) = log(x) * 8.6858896381 (EEL has no log10).
+is_read && ser_ver < 40 ? (
+  master_db = master_db <= 0 ? -60 : log(master_db) * 8.6858896381;
+  slider_automate(slider2);  // commit migrated value so future saves write dB
+  global_vol = master_db <= -60 ? 0 : exp(master_db * 0.11512925465);
+);
+// ver 36: auto-load attempt flag — set after the bridge has been asked to
+// load the default 808 kit on this instance, so we never re-trigger on
+// project re-open even if the user later cleared all pads.
+ser_ver >= 36 ? file_var(0, _auto_load_attempted);
+ser_ver >= 3 ? file_var(0, repeat_div);
+// ver 6: global velocity curve and swing
+ser_ver >= 6 ? (
+  file_var(0, vel_curve);
+  file_var(0, swing_amt);
+);
+// ver 8: global FX
+ser_ver >= 8 ? (
+  file_var(0, gfx_hpf_freq);
+  file_var(0, gfx_lpf_freq);
+  file_var(0, gfx_sat_drv);
+);
+// ver 15: global send FX parameters
+ser_ver >= 15 ? (
+  file_var(0, dly_div);
+  file_var(0, dly_fb);
+  file_var(0, dly_mix);
+  file_var(0, dly_hpf_hz);
+  file_var(0, dly_lpf_hz);
+  file_var(0, dly_ping);
+  file_var(0, rvb_size);
+  file_var(0, rvb_damp);
+  file_var(0, rvb_mix);
+  file_var(0, rvb_width);
+);
+// ver 16: master EQ + limiter parameters
+ser_ver >= 16 ? (
+  file_var(0, gfx_eq_lo);
+  file_var(0, gfx_eq_mid);
+  file_var(0, gfx_eq_hi);
+  file_var(0, gfx_lim_on);
+  file_var(0, gfx_lim_thr);
+  file_var(0, gfx_lim_rel);
+);
+// ver 17: (was full_level + sixteen_lvl, both deprecated — read for compat)
+ser_ver >= 17 ? (
+  file_var(0, _fl_compat);   // was full_level — read for migration
+  file_var(0, _16lvl_compat); // was sixteen_lvl — ignored
+);
+// ver 18: master EQ and per-pad EQ frequencies (draggable)
+ser_ver >= 18 ? (
+  file_var(0, gfx_eq_lo_freq);
+  file_var(0, gfx_eq_mid_freq);
+  file_var(0, gfx_eq_hi_freq);
+);
+// ver 20: master EQ shelf/bell toggles + kit name
+ser_ver >= 20 ? (
+  file_var(0, meq_lo_bell);
+  file_var(0, meq_hi_bell);
+  file_string(0, #kit_name);
+  is_read ? ( kit_name_gmem_dirty = 1; audiolen_gmem_dirty = 1; pad_colors_gmem_dirty = 1; pad_names_gmem_dirty = 1; );
+);
+// ver 22: note_map mode + multi_out (redundant — multi_out already at top, but
+// kept here to preserve the serial stream position for backward compatibility)
+ser_ver >= 22 ? (
+  file_var(0, note_map);
+  file_var(0, multi_out);
+);
+// ver 23: color_palette
+ser_ver >= 23 ? (
+  file_var(0, color_palette);
+  file_var(0, meq_bypass);
+);
+// ver 24: master compressor
+ser_ver >= 24 ? (
+  file_var(0, cmp_thresh);
+  file_var(0, cmp_ratio);
+  file_var(0, cmp_attack);
+  file_var(0, cmp_release);
+  file_var(0, cmp_knee);
+  file_var(0, cmp_makeup);
+  file_var(0, cmp_mix);
+  file_var(0, cmp_bypass);
+);
+// ver 25: reverb pre-delay + HPF
+ser_ver >= 25 ? (
+  file_var(0, rvb_predelay);
+  file_var(0, rvb_hpf);
+);
+// ver 32: global one-shot toggle
+ser_ver >= 32 ? (
+  file_var(0, oneshot_global);
+);
+is_read = file_avail(0) >= 0;
+is_read && ser_ver < 3 ? repeat_div = 0;
+is_read && ser_ver < 6 ? ( vel_curve = 0; swing_amt = 0; );
+is_read && ser_ver < 8 ? ( gfx_hpf_freq = 20; gfx_lpf_freq = 20000; gfx_sat_drv = 0; );
+is_read && ser_ver >= 8 ? recalc_global_fx();
+is_read && ser_ver < 15 ? (
+  dly_div = 2; dly_fb = 0.35; dly_mix = 0.5; dly_hpf_hz = 80; dly_lpf_hz = 8000; dly_ping = 1;
+  rvb_size = 0.5; rvb_damp = 0.5; rvb_mix = 0.4; rvb_width = 1.0;
+);
+is_read && ser_ver >= 15 ? ( dly_recalc(); rvb_recalc(); );
+is_read && ser_ver < 16 ? (
+  gfx_eq_lo = 0; gfx_eq_mid = 0; gfx_eq_hi = 0;
+  gfx_lim_on = 1; gfx_lim_thr = 1.0; gfx_lim_rel = 100;
+);
+is_read && ser_ver >= 16 ? (
+  gfx_lim_rel_c = exp(-1.0 / max(1, gfx_lim_rel * 0.001 * srate));
+  recalc_global_fx();
+);
+is_read && ser_ver < 17 ? (
+  _fl_compat = 0; _16lvl_compat = 0;
+);
+// Migrate old full_level → vel_curve=3
+is_read && _fl_compat > 0 && vel_curve != 3 ? ( vel_curve = 3; );
+is_read && ser_ver < 18 ? (
+  gfx_eq_lo_freq = 200;
+  gfx_eq_mid_freq = 1000;
+  gfx_eq_hi_freq = 5000;
+);
+is_read && ser_ver < 20 ? (
+  meq_lo_bell = 0;
+  meq_hi_bell = 0;
+  strcpy(#kit_name, "");
+);
+is_read && ser_ver < 22 ? (
+  note_map = 0;
+);
+is_read && ser_ver < 23 ? (
+  color_palette = 0; meq_bypass = 0;
+);
+is_read && ser_ver < 24 ? (
+  cmp_thresh = 0; cmp_ratio = 4; cmp_attack = 10; cmp_release = 100;
+  cmp_knee = 6; cmp_makeup = 0; cmp_mix = 1.0; cmp_bypass = 1;
+);
+is_read && ser_ver >= 24 ? ( cmp_recalc(); );
+is_read && ser_ver < 25 ? (
+  rvb_predelay = 0; rvb_hpf = 0;
+);
+is_read && ser_ver >= 25 ? ( rvb_recalc(); );
+is_read && ser_ver < 32 ? ( oneshot_global = 1; );
+// Existing instances (pre-v36) shouldn't suddenly auto-load 808 on project
+// re-open — assume they've already been used and skip the auto-load path.
+is_read && ser_ver < 36 ? ( _auto_load_attempted = 1; );
+
+i = 0; loop(NUM_PADS,
+  file_var(0, s_len[i]);
+  file_var(0, s_start[i]);
+  file_var(0, s_end[i]);
+  file_var(0, s_skip[i]);
+  file_var(0, s_norm[i]);
+  file_var(0, s_norm_gain[i]);
+  file_var(0, p_gain[i]);
+  file_var(0, p_pan[i]);
+  file_var(0, p_tune[i]);
+  file_var(0, p_attack[i]);
+  file_var(0, p_decay[i]);
+  file_var(0, p_sustain[i]);
+  file_var(0, p_release[i]);
+  file_var(0, p_mute[i]);
+  file_var(0, p_solo[i]);
+  file_var(0, p_output[i]);
+  file_var(0, p_note[i]);
+  file_var(0, p_note_lock[i]);
+  sp = get_path_slot(i);
+  file_string(0, sp);
+  // ver 4: per-pad color index and custom name
+  ser_ver >= 4 ? (
+    file_var(0, p_color[i]);
+    cn = get_cname_slot(i);
+    file_string(0, cn);
+  );
+  // ver 5: source sample rate
+  ser_ver >= 5 ? file_var(0, s_sr[i]);
+  // ver 6: choke group, one-shot, reverse
+  ser_ver >= 6 ? (
+    file_var(0, p_choke[i]);
+    file_var(0, p_oneshot[i]);
+    file_var(0, p_reverse[i]);
+  );
+  // ver 37: per-pad L↔R channel swap
+  ser_ver >= 37 ? file_var(0, p_swapLR[i]);
+  // ver 7: per-pad FX parameters
+  ser_ver >= 7 ? (
+    file_var(0, fx_hpf_freq[i]);
+    file_var(0, fx_lpf_freq[i]);
+    file_var(0, fx_eq_lo[i]);
+    file_var(0, fx_eq_mid[i]);
+    file_var(0, fx_eq_hi[i]);
+    file_var(0, fx_sat_drv[i]);
+  );
+  // ver 9: per-layer metadata and layer controls
+  ser_ver >= 9 ? (
+    file_var(0, p_layer_cnt[i]);
+    file_var(0, p_layer_mode[i]);
+    li = 0; loop(MAX_LAYERS,
+      _lidx = i * MAX_LAYERS + li;
+      file_var(0, l_len[_lidx]);
+      file_var(0, l_start[_lidx]);
+      file_var(0, l_end[_lidx]);
+      file_var(0, l_sr[_lidx]);
+      file_var(0, l_norm[_lidx]);
+      file_var(0, l_norm_gain[_lidx]);
+      li += 1;
+    );
+  );
+  // v10: per-layer velocity ranges and RR order
+  ser_ver >= 10 ? (
+    li = 0; loop(MAX_LAYERS,
+      _lidx = i * MAX_LAYERS + li;
+      file_var(0, l_vel_lo[_lidx]);
+      file_var(0, l_vel_hi[_lidx]);
+      file_var(0, l_rr_order[_lidx]);
+      li += 1;
+    );
+  );
+  // v11: per-layer file paths for reload
+  ser_ver >= 11 ? (
+    li = 0; loop(MAX_LAYERS,
+      _lps = LPATH_STR_BASE + i * MAX_LAYERS + li;
+      file_string(0, _lps);
+      li += 1;
+    );
+  );
+  // v12: embedded audio — write/read actual sample buffers
+  // For each layer (or legacy slot), store the used sample count then the data.
+  // Only the used portion is written, keeping preset size proportional to content.
+  ser_ver >= 12 ? (
+    p_layer_cnt[i] > 0 ? (
+      // Layered pad: embed each layer's audio
+      li = 0; loop(MAX_LAYERS,
+        _lidx = i * MAX_LAYERS + li;
+        _abuf = s_audio_start + i * SLOT_SIZE + li * LAYER_SIZE;
+        _alen = l_len[_lidx];
+        file_var(0, _alen);          // sample count (interleaved stereo pairs)
+        _alen > 0 ? file_mem(0, _abuf, _alen);
+        li += 1;
+      );
+    ) : (
+      // Legacy single-sample pad: embed full slot audio
+      _abuf = s_audio_start + i * SLOT_SIZE;
+      _alen = s_len[i];
+      file_var(0, _alen);
+      _alen > 0 ? file_mem(0, _abuf, _alen);
+    );
+  );
+  // v13: drive mode per pad
+  ser_ver >= 13 ? (
+    file_var(0, fx_drv_mode[i]);
+  );
+  // v14: bitcrush parameters
+  ser_ver >= 14 ? (
+    file_var(0, fx_bc_rate[i]);
+    file_var(0, fx_bc_bits[i]);
+  );
+  // v15: per-pad send amounts
+  ser_ver >= 15 ? (
+    file_var(0, fx_snd_dly[i]);
+    file_var(0, fx_snd_rvb[i]);
+  );
+  // v18: per-pad EQ frequencies (draggable)
+  ser_ver >= 18 ? (
+    file_var(0, fx_eq_lo_freq[i]);
+    file_var(0, fx_eq_mid_freq[i]);
+    file_var(0, fx_eq_hi_freq[i]);
+  );
+  // v19: sum mode tightness + per-pad repeat
+  ser_ver >= 19 ? (
+    file_var(0, p_sum_tight[i]);
+    file_var(0, p_rpt_div[i]);
+  );
+  // v34: per-pad sample offset
+  ser_ver >= 34 ? (
+    file_var(0, p_sample_offset[i]);
+  );
+  // v27: per-layer gain
+  ser_ver >= 27 ? (
+    li = 0; loop(MAX_LAYERS,
+      _lidx = i * MAX_LAYERS + li;
+      file_var(0, l_gain[_lidx]);
+      li += 1;
+    );
+  );
+  // v35: per-pad ADSR-user-tuned flag (1 = user touched ADSR; skip auto-analyze on drag-in)
+  ser_ver >= 35 ? (
+    file_var(0, p_adsr_user[i]);
+  );
+  // v38: per-pad compressor (amount + mode)
+  ser_ver >= 38 ? (
+    file_var(0, fx_cmp_amt[i]);
+    file_var(0, fx_cmp_mode[i]);
+  );
+  // v39: per-pad filter resonance Q
+  ser_ver >= 39 ? (
+    file_var(0, fx_reso[i]);
+  );
+  is_read ? (
+    // Defaults for older presets
+    ser_ver < 4 ? (
+      p_color[i] = i;
+      strcpy(get_cname_slot(i), "");
+    );
+    ser_ver < 5 ? s_sr[i] = 0;
+    ser_ver < 6 ? ( p_choke[i] = 0; p_oneshot[i] = 1; p_reverse[i] = 0; );
+    ser_ver < 37 ? p_swapLR[i] = 0;  // pre-v37 presets: L↔R swap off
+    ser_ver < 7 ? (
+      fx_hpf_freq[i] = 20; fx_lpf_freq[i] = 20000;
+      fx_eq_lo[i] = 0; fx_eq_mid[i] = 0; fx_eq_hi[i] = 0;
+      fx_sat_drv[i] = 0;
+    );
+    ser_ver < 9 ? (
+      p_layer_cnt[i] = 0;
+      p_layer_mode[i] = 3;
+      li = 0; loop(MAX_LAYERS,
+        _lidx = i * MAX_LAYERS + li;
+        l_len[_lidx] = 0; l_start[_lidx] = 0; l_end[_lidx] = 1.0;
+        l_sr[_lidx] = 0; l_norm[_lidx] = 0; l_norm_gain[_lidx] = 1.0;
+        l_vel_lo[_lidx] = li / MAX_LAYERS;
+        l_vel_hi[_lidx] = (li + 1) / MAX_LAYERS;
+        l_rr_order[_lidx] = li;
+        l_gain[_lidx] = 1.0;
+        li += 1;
+      );
+    );
+    ser_ver < 10 ? (
+      li = 0; loop(MAX_LAYERS,
+        _lidx = i * MAX_LAYERS + li;
+        l_vel_lo[_lidx] = li / MAX_LAYERS;
+        l_vel_hi[_lidx] = (li + 1) / MAX_LAYERS;
+        l_rr_order[_lidx] = li;
+        li += 1;
+      );
+    );
+    ser_ver < 11 ? (
+      // No layer paths stored — clear layer path strings
+      li = 0; loop(MAX_LAYERS,
+        strcpy(LPATH_STR_BASE + i * MAX_LAYERS + li, "");
+        li += 1;
+      );
+    );
+    ser_ver < 13 ? fx_drv_mode[i] = 0;  // default to SOFT
+    ser_ver < 14 ? ( fx_bc_rate[i] = 0; fx_bc_bits[i] = 16; );  // bitcrush off
+    ser_ver < 15 ? ( fx_snd_dly[i] = 0; fx_snd_rvb[i] = 0; );  // sends off
+    ser_ver < 18 ? ( fx_eq_lo_freq[i] = 200; fx_eq_mid_freq[i] = 1000; fx_eq_hi_freq[i] = 5000; );  // EQ frequency defaults
+    ser_ver < 19 ? ( p_sum_tight[i] = 0; p_rpt_div[i] = 0; );  // tight by default, repeat off
+    ser_ver < 34 ? ( p_sample_offset[i] = 0; );  // offset off
+    // v35: assume old presets had auto-derived ADSR (let drag-in re-analyze)
+    ser_ver < 35 ? ( p_adsr_user[i] = 0; );
+    ser_ver < 38 ? ( fx_cmp_amt[i] = 0; fx_cmp_mode[i] = 0; );  // compressor off
+    ser_ver < 39 ? ( fx_reso[i] = 0.707; );  // Butterworth default
+    ser_ver < 27 ? (
+      li = 0; loop(MAX_LAYERS,
+        l_gain[i * MAX_LAYERS + li] = 1.0;
+        li += 1;
+      );
+    );
+    // v26: force one-shot for all existing kits — drum pads should ignore note-off
+    // (tilr/Saike approach: samples play through, note length is irrelevant)
+    ser_ver < 26 ? p_oneshot[i] = 1;
+    // v32: migrate binary one-shot to tri-state (-1 = follow global)
+    // Old binary had no global toggle, so both 0 (gate) and 1 (one-shot) → -1
+    ser_ver >= 6 && ser_ver < 32 ? ( p_oneshot[i] = -1; );
+    // v17: migrate integer palette index → float hue
+    ser_ver < 17 && ser_ver >= 4 ? (
+      _ci = (p_color[i])|0;  // was integer 0-15
+      _ci = max(0, min(15, _ci));
+      p_color[i] = pc[_ci];  // pc[] maps old index → hue float
+    );
+    ser_ver < 17 && ser_ver < 4 ? (
+      p_color[i] = i / 16.0;  // no color stored, use evenly-spaced hues
+    );
+    // v12+: audio was embedded — already restored by file_mem above.
+    // Pre-v12: fall back to path-based reload from disk.
+    ser_ver < 12 ? (
+      // Reload legacy audio (only for non-layered pads)
+      p_layer_cnt[i] == 0 && s_len[i] > 0 && strlen(sp) > 0 ? (
+        load_from_path(i, sp);
+      );
+      // Reload layer audio from stored paths
+      p_layer_cnt[i] > 0 ? (
+        li = 0; loop(MAX_LAYERS,
+          _lps = LPATH_STR_BASE + i * MAX_LAYERS + li;
+          strlen(_lps) > 0 ? (
+            load_layer_from_path(i, li, _lps);
+          );
+          li += 1;
+        );
+      );
+    );
+    s_dirty[i] = 1;
+    recalc_pad(i);
+    recalc_fx(i);
+  );
+  i += 1;
+);
+
+// v28: lock bitmask placeholder (+ legacy map slots for ser_ver 28–30)
+ser_ver >= 28 ? (
+  _lk_compat = 0; file_var(0, _lk_compat); // lock removed — keep format slot
+  // Legacy slot data: read and discard for ser_ver 28–30
+  is_read && ser_ver >= 28 && ser_ver <= 30 ? (
+    file_var(0, _sl_discard);  // active_slot
+    _sl_si = 0; loop(16,       // 16 slots
+      _sl_pi = 0; loop(16,     // 16 pads per slot
+        // 6 numeric fields (gain, pan, pitch, output, mute, locked)
+        file_var(0, _sl_discard); file_var(0, _sl_discard);
+        file_var(0, _sl_discard); file_var(0, _sl_discard);
+        file_var(0, _sl_discard); file_var(0, _sl_discard);
+        // Path string: length + N chars
+        file_var(0, _sl_len);
+        _sl_ci = 0; loop(_sl_len, file_var(0, _sl_discard); _sl_ci += 1;);
+        // Name string: length + N chars
+        file_var(0, _sl_len);
+        _sl_ci = 0; loop(_sl_len, file_var(0, _sl_discard); _sl_ci += 1;);
+        _sl_pi += 1;
+      );
+      _sl_si += 1;
+    );
+  );
+);
+// v29: color system (theme, auto-mode, intensity)
+ser_ver >= 29 ? (
+  swing_color_serialize();
+);
+is_read && ser_ver < 29 ? (
+  col_theme_id = 0;
+  col_auto_mode_id = 0;
+  col_intensity = 1.0;
+);
+// Always rebuild pad colors after project load (prevents stale col_rgba[])
+is_read ? ( col_dirty = 1; );
+
+// v33: embedded mode knob toggle
+ser_ver >= 33 ? (
+  file_var(0, embed_show_knobs);
+);
+is_read && ser_ver < 33 ? ( embed_show_knobs = 1; );
+
+// ─── Reset companion state on project load ──────────────────────────────
+is_read ? (
+  gmem[GS_UPDATE_STATE] = 0;      // clear stale update indicator
+  gmem[GS_UPDATE_REQUEST] = 1;    // ask companion to re-check
+  heartbeat_counter = 0;
+  update_dot_alpha = 0;
+  update_dot_dir = 1;
+);
+
+// ─── Anti-pop: kill all voices + reset FX state + fade-in after deserialize ──
+is_read ? (
+  // Kill all voices immediately so @sample doesn't read half-written buffers
+  vi = 0; loop(MAX_VOICES + 1,
+    v_pos[vi] = -1; v_env[vi] = 0; v_stage[vi] = 0;
+    vi += 1;
+  );
+  // Clear delay + reverb buffers (stale tails would pop through on first sample)
+  memset(dly_bufL, 0, DLY_BUF_MAX);
+  memset(dly_bufR, 0, DLY_BUF_MAX);
+  dly_wpos = 0; dly_outL = 0; dly_outR = 0;
+  dly_fb_hpf_stL = 0; dly_fb_hpf_stR = 0;
+  dly_fb_lpf_stL = 0; dly_fb_lpf_stR = 0;
+  rvb_outL = 0; rvb_outR = 0;
+  // Clear reverb tank (delay lines + allpasses + pre-delay + filter states)
+  vi = 0; loop(8,
+    memset(rvb_dl_buf[vi], 0, RVB_MAX_DL); rvb_dl_wp[vi] = 0;
+    memset(rvb_ap_buf[vi], 0, rvb_ap_len[vi]); rvb_ap_wp[vi] = 0;
+    rvb_lp_state[vi] = 0;
+    vi += 1;
+  );
+  memset(rvb_pre_bufL, 0, RVB_MAX_PRE);
+  memset(rvb_pre_bufR, 0, RVB_MAX_PRE);
+  rvb_pre_wp = 0; rvb_hpf_stateL = 0; rvb_hpf_stateR = 0;
+  // Clear master biquad filter states (5 bands × 13 slots)
+  memset(bq_master, 0, 5 * BQ_STEREO_SIZE);
+  // Clear per-pad biquad filter states (zeroes coefficients + state)
+  memset(bq_pad, 0, NUM_PADS * BQ_PER_PAD * BQ_STEREO_SIZE);
+  // Recompute biquad coefficients from deserialized params (memset wiped them)
+  recalc_global_fx();
+  i = 0; loop(NUM_PADS, recalc_fx(i); i += 1;);
+  // Mark every pad's waveform cache dirty so the visual refreshes after
+  // chunk restore (Ctrl+Z, project reload). Without this, wv_cache holds
+  // stale data from before the deserialize and the pad keeps showing
+  // the previous waveform — making Ctrl+Z look like it did nothing
+  // even when the underlying audio buffer DID revert.
+  i = 0; loop(NUM_PADS, s_dirty[i] = 1; i += 1;);
+  // Reset compressor envelope
+  cmp_env = 0; cmp_gr_db = 0; cmp_outL = 0; cmp_outR = 0;
+  // Reset limiter envelope
+  gfx_lim_env = 1.0; gfx_lim_gr = 1.0;
+  // Start output crossfade: blend from last output (saved in _xf_prev) to new DSP.
+  // Gate: only fade if _xf_prev contains *clearly audible* audio (-40 dB).
+  // Below that, any snap-cut pop is masked by the noise floor — and arming the
+  // crossfade for sub-audible residue (e.g. reverb tail at -60 dB) means the
+  // 20ms ramp attenuates the first hit's transient before the @sample
+  // short-circuit (-80 dB) can deactivate it. Threshold split is intentional.
+  abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+    _xf_pos = 0;
+    _xf_len = max(1, (0.020 * srate)|0);  // 20ms crossfade
+    _xf_active = 1;
+  );
+
+  // Sync param smoothers to chunk-loaded targets so they don't ramp from
+  // their @init defaults (0 / 1.0) on the first audio block. Without this,
+  // the saturator/master-volume ramp slowly toward the saved values and
+  // the FIRST hit (or first whole pass of a loop) sounds quieter than
+  // subsequent ones — symptom: "first kick is soft, fine after the loop
+  // wraps once."
+  _sat_drv_sm = gfx_sat_drv;
+  _vol_sm     = global_vol;
+
+  // ── Chunk-truncation audio repair detection ───────────────────────────
+  // REAPER's FX-state chunk has a hard size limit. For big kits (e.g.
+  // 808 at ~2 MB) the audio embedded via `file_mem(0, _abuf, _alen)`
+  // gets truncated on chunk capture — the metadata round-trips fine
+  // but the audio buffer comes back zeroed on chunk restore (Undo, Redo,
+  // project reopen). The auto-kit-sidecar mechanism handles project
+  // reopen separately; this detector handles Undo/Redo + any other
+  // mid-session chunk restore.
+  //
+  // Heuristic: for each pad whose metadata says s_len > 100 (real audio
+  // expected, not just empty), probe THREE positions in the buffer —
+  // start (samples 0/1/2), middle (s_len/2), end (s_len-1). If ALL of
+  // those are exactly 0, the buffer was wiped — flag for repair. Three
+  // probes mitigate false positives from pads that legitimately start
+  // with silence preroll (kick attacks, denormal-cleared tails).
+  //
+  // On any pad failing the check, set GS_AUDIO_REPAIR_REQ = instance_id
+  // so the bridge knows WHICH instance to repair. Multiple instances
+  // can fail in the same session — the bridge processes them serially
+  // by clearing the slot after each one (last-writer-wins is fine
+  // because each flagged instance keeps re-writing until repaired).
+  _ar_truncated = 0;
+  _ar_pi = 0; loop(NUM_PADS,
+    s_len[_ar_pi] > 100 ? (
+      _ar_buf = s_audio_start + _ar_pi * SLOT_SIZE;
+      _ar_mid = (s_len[_ar_pi] / 2) | 0;
+      _ar_end = s_len[_ar_pi] - 1;
+      // All-zero check at three positions — buffer is wiped iff every
+      // probe is exactly 0. A real-audio pad has at least one non-zero
+      // sample across these three points (probability ≈ 1).
+      _ar_buf[0] == 0 && _ar_buf[1] == 0 && _ar_buf[2] == 0 &&
+        _ar_buf[_ar_mid] == 0 && _ar_buf[_ar_end] == 0 ?
+        _ar_truncated = 1;
+    );
+    _ar_pi += 1;
+  );
+  _ar_truncated ? gmem[GS_AUDIO_REPAIR_REQ] = instance_id;
+);
+
+// ─── Graphics ─────────────────────────────────────────────────────────────
+@gfx 780 720
+
+// Skip first 2 frames — gfx_w/gfx_h may not be valid yet on project load
+gfx_frame_count += 1;
+gfx_frame_count <= 2 ? (
+  gfx_set(0, 0, 0, 1); gfx_rect(0, 0, gfx_w, gfx_h);
+) : (
+
+// ── Deferred undo action processor ──
+swing_ui_process_undo();
+
+// ── Frame globals (required by knobs_kbsg) ──
+_char = gfx_getchar();
+is_embedded = gfx_ext_flags & 1;
+mx = mouse_x; my = mouse_y;
+LMB = mouse_cap & 1;
+lmb_down = LMB && !prev_LMB;
+RMB = mouse_cap & 2;
+rmb_down = RMB && !prev_RMB;
+CTRL  = mouse_cap & 4;
+SHIFT = mouse_cap & 8;
+// Global safety: release active_id when mouse button is up
+!LMB && active_id >= 0 ? active_id = -1;
+dt = min(time_precise() - frame_last_timer, 0.05);
+frame_last_timer = time_precise();
+hv_speed = 11;
+frame_wheel = mouse_wheel / 120;
+mouse_wheel = 0;
+
+// ── Overlay modal gate ──
+swing_ui_modal_gate();
+
+// ── Kit-import gate + state machine moved to @block (above @sample),
+//    so they fire even when the FX window is closed. The @gfx side here
+//    keeps swing_ui_export_tick() because export uses gfx-context modal
+//    dialogs (file save, name prompt) that genuinely need @gfx.
+swing_ui_export_tick();
+
+// ── Misc commands: auto-color, rename, meters, caches ──
+swing_ui_misc_cmds();
+
+// ── Pre-computed pad colors ──
+col_dirty ? (
+  swing_color_rebuild();
+  // Flush pad hues + effective S/L to gmem so the Kit Bridge can sync
+  // multi-out track colors without the browser being open.
+  _ki = 0; loop(NUM_PADS,
+    gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 12] =
+      col_auto_mode_id > 0 ? col_auto_hue[_ki] : p_color[_ki];
+    _ki += 1;
+  );
+  swing_color_get_theme_sl(col_theme_id);
+  gmem[GS_COL_EFFECTIVE_S] = _sc_s * col_intensity;
+  gmem[GS_COL_EFFECTIVE_L] = _sc_l;
+);
+
+// ── Color constants ──
+swing_ui_set_colors();
+
+// ── Browser sync: write window size + dirty UI state to gmem (see rk_swing_ui_state.jsfx-inc) ──
+swing_browser_sync_gmem_writes();
+
+browser_running = gmem[GS_BROWSER_OPEN];
+media_explorer_running = gmem[GS_MEDIA_EXPLORER_OPEN];
+
+// ── Browser sample/layer load (CMD 63 / 64) — see rk_swing_browser_load.jsfx-inc ──
+// NOTE: Both must run BEFORE the GS_BROWSE_PAD sync below, otherwise we'd
+// overwrite the browser's target pad before the handler reads it.
+// (Each handler internally checks _is_browser_target() so secondary
+//  Swing instances ignore the CMD.)
+gmem[KIT_GMEM_CMD] == 63 ? swing_browser_load_pad();
+gmem[KIT_GMEM_CMD] == 64 ? swing_browser_load_layer();
+// Sync selected pad to gmem AFTER CMD 63/64 so browser's target pad isn't
+// overwritten. Only the active instance writes — otherwise two instances
+// would race and the browser would jump between their pad selections.
+_is_browser_target() ? gmem[GS_BROWSE_PAD] = sel_pad;
+
+// ── Live mute/solo sync to browser ──────────────────────────────────────
+// Writes effective-mute state per pad (mute toggle OR muted-by-solo) so
+// the browser pad swatches can dim muted pads to match the JSFX UI. Only
+// the active browser-target instance writes — otherwise multiple instances
+// would race on the same gmem block.
+_is_browser_target() ? (
+  _pmi = 0;
+  loop(NUM_PADS,
+    gmem[GS_PAD_MUTED_BASE + _pmi] =
+      (p_mute[_pmi] || (any_solo && !p_solo[_pmi])) ? 1 : 0;
+    _pmi += 1;
+  );
+);
+
+// ── Auto-load 808 gate moved to @block (above @sample) so it fires on
+//    fresh inserts even when the FX window isn't open yet. The block-
+//    side path is functionally identical — same condition, same
+//    PENDING_LOAD_INST routing, same _auto_load_attempted flag.
+
+// ── Companion script commands ──────────────────────────────────────────
+_ccmd = gmem[GS_COMPANION_CMD]|0;
+_ccmd > 0 && !kit_busy ? (
+  _ccmd == 4 ? ( // New kit — full reset (pads + name + FX). See rk_swing_defaults.jsfx-inc.
+    swing_new_kit_full_reset();
+  );
+  gmem[GS_COMPANION_CMD] = 0;
+);
+
+is_embedded ? (
+  // ═══════════════════════════════════════════════════════════════════════
+  // EMBEDDED — Maximized 4×4 coloured pad grid with waveforms + note info
+  // ═══════════════════════════════════════════════════════════════════════
+  swing_grid_draw_embedded();
+) : (
+  // ═══════════════════════════════════════════════════════════════════════
+  // FLOATING WINDOW
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── Background ──
+  gfx_set(bg_r, bg_g, bg_b, 1); gfx_rect(0, 0, gfx_w, gfx_h);
+  // Subtle brushed plastic texture
+  gfx_set(0.15, 0.14, 0.13, 0.02);
+  _tex_y = 31;
+  loop(((gfx_h - 31) / 3)|0,
+    gfx_rect(0, _tex_y, gfx_w, 1);
+    _tex_y += 3;
+  );
+
+  // ── Header + layout + LCD frame ──
+  swing_ui_draw_header();
+  swing_ui_calc_layout();
+  swing_lcd_draw(right_x, 28, right_w, LCD_BAR_H);
+  swing_ui_draw_lcd_frame();
+
+  // ── LCD content pages ──
+  lcd_mode == 1 ? swing_panels_draw_eq();
+  lcd_mode == 2 ? swing_panels_draw_delay();
+  lcd_mode == 3 ? swing_panels_draw_reverb();
+  lcd_mode == 5 ? swing_panels_draw_comp();
+  // Always reset GR meter each frame
+  gfx_lim_gr = 1.0;
+  lcd_mode == 4 ? swing_panels_draw_mixer();
+
+  // ── Left panel controls + master ──
+  swing_panels_draw_controls();
+  swing_panels_draw_master();
+
+  // ── Right panel: pad grid ──
+  swing_grid_draw_shadow();
+  swing_grid_draw_pads();
+
+  // ── Overlay panel (right-click editor) ──
+  overlay_pad >= 0 ? swing_grid_draw_overlay();
+
+  // ── Tooltip overlay (renders on top of everything else) ──
+  // swing_tooltip_check() is called from individual control hover sites
+  // throughout the panel draws above; this draws the box once at the end
+  // and resets per-frame tooltip state for the next tick.
+  swing_tooltip_draw();
+);
+
+// Release GUI-held pad on mouse-up
+gui_held_pad >= 0 && !LMB ? (
+  // When effective one-shot is OFF (gate mode), release voices on mouse-up
+  _eos = p_oneshot[gui_held_pad];
+  (_eos == 0 || (_eos < 0 && !oneshot_global)) ? (
+    i = 0; loop(MAX_VOICES + 1,
+      v_slot[i] == gui_held_pad && v_stage[i] < 4 ? v_stage[i] = 4;
+      i += 1;
+    );
+  );
+  p_held[gui_held_pad] = 0;
+  gui_held_pad = -1;
+);
+
+frame_wheel = 0;
+prev_LMB = mouse_cap & 1;
+prev_RMB = mouse_cap & 2;
+last_mouse_cap = mouse_cap;
+
+
+); // end gfx_frame_count > 2 guard

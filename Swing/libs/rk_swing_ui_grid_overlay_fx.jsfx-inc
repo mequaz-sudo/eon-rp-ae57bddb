@@ -1,0 +1,1176 @@
+// rk_swing_ui_grid_overlay_fx.jsfx-inc
+// Swing overlay: waveform/ADSR, EQ response, FX knobs, button rows
+// Sub-functions for swing_grid_draw_overlay() — zero behavioral change
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function _ov_draw_waveform_and_adsr()
+local(val, j, _rev_j, sample_idx, wv_cy, step, _has_ctrl_row)
+(
+    // ── Sample display: waveform + ADSR envelope overlaid ─────────────
+    // Waveform positioned below tabs + optional control row
+    _has_ctrl_row = (p_layer_mode[oi] == 1 || p_layer_mode[oi] == 2 || p_layer_mode[oi] == 3);
+    wf_y = _has_ctrl_row ? op_y + 100 : op_y + 54;
+    wf_x = op_x + 10; wf_w = op_w - 20; wf_h = 120;
+    gfx_set(0.06, 0.06, 0.08, 1); gfx_rect(wf_x, wf_y, wf_w, wf_h);
+
+    // Waveform (full frame) — show layer waveform if in layer mode, else legacy
+    // If viewing a layer that has audio, show it. If empty, force _slen=0 for "DRAG SAMPLE HERE".
+    _slen = 0;
+    p_layer_cnt[oi] > 0 ? (
+      _lidx = oi * MAX_LAYERS + overlay_layer;
+      _slen = l_len[_lidx];
+      _sstart = l_start[_lidx];
+      _send = l_end[_lidx];
+      buf = s_audio_start + oi * SLOT_SIZE + overlay_layer * LAYER_SIZE;
+      // Normalize gain only — see build_wv_cache contract (no user mix knobs).
+      sg = l_norm[_lidx] ? l_norm_gain[_lidx] : 1.0;
+    ) : overlay_layer == 0 ? (
+      // Legacy (no layers) — only show on layer 0
+      _slen = s_len[oi];
+      _sstart = s_start[oi];
+      _send = s_end[oi];
+      buf = s_audio_start + oi * SLOT_SIZE;
+      sg = s_norm[oi] ? s_norm_gain[oi] : 1.0;
+    );
+    _slen > 0 ? (
+      // ── Mouse wheel zoom in waveform area ──
+      _in_wf = mx >= wf_x && mx <= wf_x + wf_w && my >= wf_y && my <= wf_y + wf_h;
+      _in_wf && mouse_wheel != 0 ? (
+        _mpos_norm = (mx - wf_x) / wf_w;  // cursor position 0–1 in display
+        _old_zoom = wf_zoom;
+        mouse_wheel > 0 ? wf_zoom = min(64, wf_zoom * 1.25) : wf_zoom = max(1, wf_zoom / 1.25);
+        // Adjust scroll to keep the cursor point stable
+        _view_w = 1.0 / wf_zoom;
+        _cursor_norm = wf_scroll + _mpos_norm * (1.0 / _old_zoom);
+        wf_scroll = _cursor_norm - _mpos_norm * _view_w;
+        wf_scroll = max(0, min(1.0 - _view_w, wf_scroll));
+        mouse_wheel = 0;
+      );
+
+      // ── Zoom-aware rendering ──
+      _view_w = 1.0 / wf_zoom;
+      _view_start = wf_scroll;  // normalized 0–1 start of visible region
+      _view_end = wf_scroll + _view_w;
+      // Total mono samples = _slen / 2 (interleaved stereo)
+      _mono_len = _slen / 2;
+      _vis_s0 = (_view_start * _mono_len)|0;
+      _vis_s1 = (_view_end * _mono_len)|0;
+      _vis_range = max(1, _vis_s1 - _vis_s0);
+      step = _vis_range / wf_w;
+
+      // Stereo (L != R content) → top=L bottom=R; mono → single centered.
+      gfx_set(pr * 0.5 + 0.1, pgg * 0.5 + 0.1, pb * 0.5 + 0.1, 0.45);
+      p_stereo[oi] ? (
+        _wf_amp_scale = (wf_h / 4.8) * sg;
+        _wv_top_cy    = wf_y + wf_h * 0.25;
+        _wv_bot_cy    = wf_y + wf_h * 0.75;
+        j = 0; loop(wf_w,
+          _rev_j = p_reverse[oi] ? (wf_w - 1 - j) : j;
+          sample_idx = (_vis_s0 + (_rev_j * step)|0);
+          sample_idx = min(sample_idx, _mono_len - 1);
+          val_L = abs(buf[sample_idx * 2])     * _wf_amp_scale;
+          val_R = abs(buf[sample_idx * 2 + 1]) * _wf_amp_scale;
+          gfx_line(wf_x + j, _wv_top_cy - val_L, wf_x + j, _wv_top_cy + val_L);
+          gfx_line(wf_x + j, _wv_bot_cy - val_R, wf_x + j, _wv_bot_cy + val_R);
+          j += 1;
+        );
+      ) : (
+        wv_cy = wf_y + wf_h * 0.5;
+        _wf_amp_scale = (wf_h / 2.4) * sg;
+        j = 0; loop(wf_w,
+          _rev_j = p_reverse[oi] ? (wf_w - 1 - j) : j;
+          sample_idx = (_vis_s0 + (_rev_j * step)|0);
+          sample_idx = min(sample_idx, _mono_len - 1);
+          val = buf[sample_idx * 2] * _wf_amp_scale;  // L = R for mono
+          gfx_line(wf_x + j, wv_cy - val, wf_x + j, wv_cy + val);
+          j += 1;
+        );
+      );
+
+      // ── Start/end trim markers (zoom-aware, mirrored when reversed) ──
+      // Convert normalized start/end to pixel positions in the current view
+      p_reverse[oi] ? (
+        sx = wf_x + wf_w - (_send - _view_start) / _view_w * wf_w;
+        ex = wf_x + wf_w - (_sstart - _view_start) / _view_w * wf_w;
+      ) : (
+        sx = wf_x + (_sstart - _view_start) / _view_w * wf_w;
+        ex = wf_x + (_send - _view_start) / _view_w * wf_w;
+      );
+      mid_y = wf_y + wf_h / 2;
+      // Only draw markers if they're in the visible range
+      sx >= wf_x - 5 && sx <= wf_x + wf_w + 5 ? (
+        gfx_set(1, 1, 0, 0.7); gfx_line(sx, wf_y, sx, wf_y + wf_h);
+        gfx_set(1, 1, 0, 0.9); gfx_rect(sx - 2, mid_y - 15, 5, 30, 1);
+      );
+      ex >= wf_x - 5 && ex <= wf_x + wf_w + 5 ? (
+        gfx_set(1, 0.3, 0.3, 0.7); gfx_line(ex, wf_y, ex, wf_y + wf_h);
+        gfx_set(1, 0.3, 0.3, 0.9); gfx_rect(ex - 2, mid_y - 15, 5, 30, 1);
+      );
+
+      // ── Sample offset dim overlay (absolute position) ──
+      p_sample_offset[oi] > 0.001 ? (
+        _ofs_norm = p_sample_offset[oi];  // absolute 0-1 in full sample
+        p_reverse[oi] ? (
+          // Reverse: dim from offset to end (right side of reversed view)
+          _dim_left = wf_x + wf_w - (_ofs_norm - _view_start) / _view_w * wf_w;
+          _dim_right = wf_x + wf_w - (_sstart - _view_start) / _view_w * wf_w;
+        ) : (
+          // Forward: dim from start to offset
+          _dim_left = wf_x + (_sstart - _view_start) / _view_w * wf_w;
+          _dim_right = wf_x + (_ofs_norm - _view_start) / _view_w * wf_w;
+        );
+        _dim_left = max(wf_x, min(wf_x + wf_w, _dim_left));
+        _dim_right = max(wf_x, min(wf_x + wf_w, _dim_right));
+        _dim_right > _dim_left ? (
+          gfx_set(0.06, 0.06, 0.08, 0.7);
+          gfx_rect(_dim_left, wf_y, _dim_right - _dim_left, wf_h);
+        );
+      );
+
+      // ── Zero-crossing center line ──
+      gfx_set(0.4, 0.4, 0.4, 0.15);
+      gfx_line(wf_x, wf_y + wf_h * 0.5, wf_x + wf_w, wf_y + wf_h * 0.5);
+
+      // ── Zoom indicator (top-right of waveform) ──
+      wf_zoom > 1.01 ? (
+        gfx_setfont(1, "Arial", 9, 'b');
+        gfx_set(0.7, 0.7, 0.7, 0.6);
+        sprintf(#_ztxt, "%.0fx", wf_zoom);
+        gfx_measurestr(#_ztxt, tw, th);
+        gfx_x = wf_x + wf_w - tw - 4; gfx_y = wf_y + 3; gfx_drawstr(#_ztxt);
+        // Scroll bar indicator at bottom of waveform
+        gfx_set(0.5, 0.5, 0.5, 0.3);
+        _sb_x = wf_x + wf_scroll * wf_w;
+        _sb_w = max(4, _view_w * wf_w);
+        gfx_rect(_sb_x, wf_y + wf_h - 3, _sb_w, 3);
+      );
+
+      // ── Trim drag interaction (zoom-aware with zero-crossing snap) ──
+      //
+      // Reverse-mode handling:
+      //   When p_reverse is on, the waveform AND the handle markers
+      //   mirror horizontally (lines 70/83/94-99 above). That means:
+      //     - sx (active_id 200) is visually positioned by _send (right side)
+      //     - ex (active_id 201) is visually positioned by _sstart (left side)
+      //   Two corrections required for drag to feel natural:
+      //     1. Mirror the X→sample mapping so dragging right means a higher
+      //        sample position regardless of reverse state (the user's mouse
+      //        moves with the visible handle).
+      //     2. Swap which variable each active_id updates so the handle the
+      //        user grabbed is the one that visibly moves.
+      active_id == 200 ? (
+        LMB ? (
+          _raw_norm = p_reverse[oi]
+            ? (_view_end - ((mx - wf_x) / wf_w) * _view_w)
+            : (_view_start + ((mx - wf_x) / wf_w) * _view_w);
+          // Snap to zero crossing if enabled
+          wf_snap_zc ? (
+            _zc_si = (_raw_norm * _mono_len)|0;
+            _zc_si = max(0, min(_mono_len - 2, _zc_si));
+            // Search ±64 samples for nearest zero crossing
+            _best_d = 9999; _best_i = _zc_si; _zi = max(0, _zc_si - 64);
+            loop(128,
+              _zi < _mono_len - 1 ? (
+                buf[_zi * 2] * buf[(_zi + 1) * 2] <= 0 ? (
+                  _d = abs(_zi - _zc_si);
+                  _d < _best_d ? ( _best_d = _d; _best_i = _zi; );
+                );
+              );
+              _zi += 1;
+            );
+            _raw_norm = _best_i / _mono_len;
+          );
+          // Forward: sx → s_start. Reverse: sx tracks s_end (mirrored).
+          p_reverse[oi] ? (
+            p_layer_cnt[oi] > 0 ? (
+              l_end[_lidx] = min(1, max(_raw_norm, l_start[_lidx] + 0.005));
+            ) : (
+              s_end[oi] = min(1, max(_raw_norm, s_start[oi] + 0.005));
+            );
+          ) : (
+            p_layer_cnt[oi] > 0 ? (
+              l_start[_lidx] = max(0, min(_raw_norm, l_end[_lidx] - 0.005));
+            ) : (
+              s_start[oi] = max(0, min(_raw_norm, s_end[oi] - 0.005));
+            );
+          );
+        ) : active_id = -1;
+      );
+      active_id == 201 ? (
+        LMB ? (
+          _raw_norm = p_reverse[oi]
+            ? (_view_end - ((mx - wf_x) / wf_w) * _view_w)
+            : (_view_start + ((mx - wf_x) / wf_w) * _view_w);
+          // Snap to zero crossing if enabled
+          wf_snap_zc ? (
+            _zc_si = (_raw_norm * _mono_len)|0;
+            _zc_si = max(0, min(_mono_len - 2, _zc_si));
+            _best_d = 9999; _best_i = _zc_si; _zi = max(0, _zc_si - 64);
+            loop(128,
+              _zi < _mono_len - 1 ? (
+                buf[_zi * 2] * buf[(_zi + 1) * 2] <= 0 ? (
+                  _d = abs(_zi - _zc_si);
+                  _d < _best_d ? ( _best_d = _d; _best_i = _zi; );
+                );
+              );
+              _zi += 1;
+            );
+            _raw_norm = _best_i / _mono_len;
+          );
+          // Forward: ex → s_end. Reverse: ex tracks s_start (mirrored).
+          p_reverse[oi] ? (
+            p_layer_cnt[oi] > 0 ? (
+              l_start[_lidx] = max(0, min(_raw_norm, l_end[_lidx] - 0.005));
+            ) : (
+              s_start[oi] = max(0, min(_raw_norm, s_end[oi] - 0.005));
+            );
+          ) : (
+            p_layer_cnt[oi] > 0 ? (
+              l_end[_lidx] = min(1, max(_raw_norm, l_start[_lidx] + 0.005));
+            ) : (
+              s_end[oi] = min(1, max(_raw_norm, s_start[oi] + 0.005));
+            );
+          );
+        ) : active_id = -1;
+      );
+      active_id == -1 && lmb_down ? (
+        mx >= sx - 4 && mx <= sx + 5 && my >= mid_y - 15 && my <= mid_y + 15 ? active_id = 200;
+        mx >= ex - 4 && mx <= ex + 5 && my >= mid_y - 15 && my <= mid_y + 15 ? active_id = 201;
+      );
+
+      // ── Middle-click/Ctrl+drag to scroll when zoomed ──
+      _in_wf && wf_zoom > 1.01 ? (
+        (mouse_cap & 64) || (CTRL && LMB) ? (  // middle mouse or ctrl+left
+          _scroll_active == 0 && lmb_down ? ( _scroll_active = 1; _scroll_mx = mx; _scroll_orig = wf_scroll; );
+        ) : _scroll_active = 0;
+        _scroll_active && LMB ? (
+          _dx = (mx - _scroll_mx) / wf_w;
+          wf_scroll = max(0, min(1.0 - _view_w, _scroll_orig - _dx * _view_w));
+        ) : _scroll_active = 0;
+      );
+    ) : (
+      gfx_set(0.30, 0.32, 0.36, 1);
+      gfx_setfont(1, "Arial", 10, 0);
+      gfx_measurestr("DRAG SAMPLE HERE", tw, th);
+      gfx_x = wf_x + (wf_w - tw)/2; gfx_y = wf_y + (wf_h - th)/2; gfx_drawstr("DRAG SAMPLE HERE");
+    );
+
+    // ADSR envelope overlay (same frame, on top of waveform) — 4-node design
+    env_x = wf_x; env_y = wf_y; env_w = wf_w; env_h = wf_h;
+    a_ms = max(1, p_attack[oi]);
+    d_ms = max(1, p_decay[oi]);
+    r_ms = max(1, p_release[oi]);
+    sus_lv = p_sustain[oi];
+    env_margin = 6;  // px inset from top/bottom
+
+    // Fixed-zone layout: each ADSR segment gets a fixed max pixel allocation.
+    // Node positions depend only on their own parameter (+ preceding for sequencing).
+    // This prevents the bug where changing one parameter visually shifts other nodes.
+    // Max values match the actual knob ranges.
+    a_max_w  = env_w * 0.20;   // attack zone:  0-500ms
+    d_max_w  = env_w * 0.35;   // decay zone:   0-5000ms
+    s_hold_w = env_w * 0.10;   // sustain hold:  fixed
+    r_max_w  = env_w * 0.35;   // release zone: 0-2000ms
+
+    // Pixel widths from parameter values (LOG scaling for time params,
+    // matching the log drag mapping below). Linear scaling collapsed
+    // 1-100ms decay into ~1 pixel, leaving the D node visually pinned
+    // to the A node and impossible to grab. Log spreads the low end so
+    // a 50ms decay sits visibly past the A node.
+    //   log(value) / log(max) * width
+    //   value=1   → 0 (start of zone)
+    //   value=max → width (end of zone)
+    a_px = min(a_max_w, log(a_ms)  / log(1000.0)  * a_max_w);
+    d_px = min(d_max_w, log(d_ms)  / log(10000.0) * d_max_w);
+    r_px = min(r_max_w, log(r_ms)  / log(5000.0)  * r_max_w);
+    s_px = s_hold_w;
+
+    // Node coordinates — sequential, each depends only on own + prior params.
+    //
+    // Reverse mode: mirror horizontally so the envelope direction matches
+    // the mirrored waveform render (lines 70/83) and trim handles. In
+    // reverse, audio plays end → start (right → left visually), so the
+    // attack-start node sits at the RIGHT edge and walks LEFT through
+    // D / S / R. Without this mirror, the ADSR shape went one direction
+    // while the audio played the other — confusing.
+    //
+    // _adsr_dir is +1 forward, -1 reverse; node X coords use it as the
+    // step sign so the same code paths work for both orientations.
+    _adsr_dir = p_reverse[oi] ? -1 : 1;
+    n0x = p_reverse[oi] ? (env_x + env_w) : env_x;
+                              n0y = env_y + env_h - env_margin;   // attack start
+    n1x = n0x + _adsr_dir * a_px;  n1y = env_y + env_margin;           // attack peak
+    n2x = n1x + _adsr_dir * d_px;  n2y = env_y + env_margin + (env_h - env_margin*2) * (1 - sus_lv);
+    n3x = n2x + _adsr_dir * s_px;  n3y = n2y;                          // sustain end
+    n4x = n3x + _adsr_dir * r_px;  n4y = env_y + env_h - env_margin;   // release end
+
+    // Filled envelope shape (semi-transparent over waveform) — 4 nodes.
+    // Loop step uses _adsr_dir so the fill walks in the correct direction.
+    gfx_set(pr * 0.4, pgg * 0.4, pb * 0.4, 0.25);
+    j = 0; loop(max(1, (a_px)|0),
+      fx = n0x + _adsr_dir * j; fy = n0y + (n1y - n0y) * (j / max(1, a_px));
+      gfx_line(fx, fy, fx, env_y + env_h - env_margin); j += 1;
+    );
+    j = 0; loop(max(1, (d_px)|0),
+      fx = n1x + _adsr_dir * j; t = j / max(1, d_px); fy = n1y + (n2y - n1y) * t;
+      gfx_line(fx, fy, fx, env_y + env_h - env_margin); j += 1;
+    );
+    j = 0; loop(max(1, (s_px)|0),
+      fx = n2x + _adsr_dir * j; gfx_line(fx, n2y, fx, env_y + env_h - env_margin); j += 1;
+    );
+    j = 0; loop(max(1, (r_px)|0),
+      fx = n3x + _adsr_dir * j; t = j / max(1, r_px); fy = n3y + (n4y - n3y) * t;
+      gfx_line(fx, fy, fx, env_y + env_h - env_margin); j += 1;
+    );
+
+    // Envelope line (bright, visible over waveform) — all 5 points
+    gfx_set(pr * 0.5 + 0.5, pgg * 0.5 + 0.5, pb * 0.5 + 0.5, 0.85);
+    gfx_line(n0x, n0y, n1x, n1y);    // attack start → attack peak
+    gfx_line(n1x, n1y, n2x, n2y);    // decay → sustain
+    gfx_line(n2x, n2y, n3x, n3y);    // sustain → sustain-end
+    gfx_line(n3x, n3y, n4x, n4y);    // sustain-end → release
+
+    // Draggable nodes — 4 independent nodes: A, D, S, R
+    // n0 is fixed (attack start), n3 is auto-positioned (sustain end)
+    nr = 7;
+    _nr_hit = nr + 8;  // generous hit radius for easy grabbing
+    gfx_set(1, 0.9, 0.3, 1);   gfx_circle(n1x, n1y, nr, 1);   // A — attack peak (yellow), drag X = attack time
+    gfx_set(0.5, 0.8, 1, 1);   gfx_circle(n2x, n2y, nr, 1);   // D — decay end (blue), drag X = decay time
+    gfx_set(0.3, 1, 0.7, 1);   gfx_circle(n3x, n3y, nr, 1);   // S — sustain level (green), drag Y = sustain level
+    gfx_set(1, 0.4, 0.4, 1);   gfx_circle(n4x, n4y, nr, 1);   // R — release end (red), drag X = release time
+
+    // Node labels
+    gfx_setfont(1, "Arial", 10, 'b'); gfx_set(0.75, 0.77, 0.80, 0.85);
+    gfx_x = n1x - 6; gfx_y = n1y - 12; gfx_drawstr("A");
+    gfx_x = n2x - 6; gfx_y = n2y + 6;  gfx_drawstr("D");
+    gfx_x = n3x - 6; gfx_y = n3y - 12; gfx_drawstr("S");
+    gfx_x = n4x - 6; gfx_y = n4y + 6;  gfx_drawstr("R");
+
+    // Node interaction (drag IDs: 210=attack, 211=decay, 212=sustain, 213=release)
+    // Delta-based: capture mouse + value on mousedown, apply delta during drag.
+    // Each uses its own zone width as divisor — fully decoupled.
+    //
+    // Time params (A/D/R) use LOG scaling: each pixel of drag scales the
+    // current value by a constant factor instead of adding a fixed ms.
+    // Without this, low values (1-50ms — the most musically useful range
+    // for drum samples) collapse into a few pixels and become impossible
+    // to dial in. Log mapping gives full pixel-resolution at the bottom
+    // and faster sweeps at the top. Sustain stays linear because it's a
+    // 0..1 level, not a time.
+    // Reverse mode: mirror the drag X mapping so dragging right always
+    // moves the visible node right (regardless of envelope orientation).
+    // Without this, in reverse mode a rightward drag would shrink the
+    // envelope leftward visually — opposite of what the user expects.
+    // _adsr_dir = +1 forward, -1 reverse (declared above).
+    active_id == 210 ? (  // A node (n1) — drag X = attack time (1..500ms log)
+      LMB ? (
+        delta_px = (mx - adsr_drag_mx) * _adsr_dir;
+        // log(1000) ≈ 6.91 — full drag width sweeps 1..1000ms.
+        p_attack[oi] = max(1, min(1000,
+          max(1, adsr_drag_val) * exp((delta_px / max(1, a_max_w)) * log(1000))
+        ));
+        p_adsr_user[oi] = 1;  // user-tuned — skip auto-analyze on next drag-in
+        recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+    active_id == 211 ? (  // D node (n2) — drag X = decay time (1..5000ms log)
+      LMB ? (
+        delta_px = (mx - adsr_drag_mx) * _adsr_dir;
+        // log(10000) ≈ 9.21. Wide range covers atmospheric tails; log
+        // keeps the 1-200ms drum range precise at the bottom.
+        p_decay[oi] = max(1, min(10000,
+          max(1, adsr_drag_val) * exp((delta_px / max(1, d_max_w)) * log(10000))
+        ));
+        p_adsr_user[oi] = 1;
+        recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+    active_id == 212 ? (  // S node (n3) — drag Y = sustain level (linear 0..1)
+      LMB ? (
+        // Y axis is unaffected by reverse — sustain is a level, not a time.
+        delta_py = my - adsr_drag_my;
+        p_sustain[oi] = max(0, min(1, adsr_drag_val - delta_py / max(1, env_h - env_margin * 2)));
+        p_adsr_user[oi] = 1;
+        recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+    active_id == 213 ? (  // R node (n4) — drag X = release time (1..2000ms log)
+      LMB ? (
+        delta_px = (mx - adsr_drag_mx) * _adsr_dir;
+        // log(5000) ≈ 8.52. Extended for ambient/reverb-tail samples.
+        p_release[oi] = max(1, min(5000,
+          max(1, adsr_drag_val) * exp((delta_px / max(1, r_max_w)) * log(5000))
+        ));
+        p_adsr_user[oi] = 1;
+        recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+
+    // Display border
+    gfx_set(0.22, 0.23, 0.27, 1); gfx_rect(wf_x, wf_y, wf_w, wf_h, 0);
+
+    // Center play button
+    center_x = wf_x + wf_w / 2;
+    center_y = wf_y + wf_h / 2;
+    gfx_set(0.8, 0.8, 0.8, 0.5);
+    gfx_circle(center_x, center_y, 15, 1);
+    gfx_set(0.2, 0.2, 0.2, 1);
+    gfx_setfont(1, "Arial", 10, 'b');
+    gfx_measurestr("▶", tw, th);
+    gfx_x = center_x - tw/2; gfx_y = center_y - th/2; gfx_drawstr("▶");
+
+    // Center trigger — use proper voice launcher (handles choke groups, voice stealing)
+    active_id == -1 && lmb_down && mx >= center_x - 15 && mx <= center_x + 15 && my >= center_y - 15 && my <= center_y + 15 && pad_has_audio(oi) ? (
+      launch_voices_for_pad(oi, 127, 8);
+      p_held[oi] = 1; p_held_vel[oi] = 127; gui_held_pad = oi;
+    );
+
+    // Node hit detection — priority order with early exit (generous hit area)
+    active_id == -1 && lmb_down && my >= env_y - _nr_hit && my <= env_y + env_h + _nr_hit ? (
+      adsr_drag_mx = mx; adsr_drag_my = my;
+      dist(mx, my, n1x, n1y) <= _nr_hit ? (
+        active_id = 210; adsr_drag_val = p_attack[oi];
+      ) : dist(mx, my, n2x, n2y) <= _nr_hit ? (
+        active_id = 211; adsr_drag_val = p_decay[oi];
+      ) : dist(mx, my, n3x, n3y) <= _nr_hit ? (
+        active_id = 212; adsr_drag_val = p_sustain[oi];
+      ) : dist(mx, my, n4x, n4y) <= _nr_hit ? (
+        active_id = 213; adsr_drag_val = p_release[oi];
+      );
+    );
+
+    // (Right-click "Re-analyze ADSR" removed — auto-analysis was unreliable
+    // from inside JSFX. Will be re-added when the EON Extension can do it
+    // properly with the actual sample in C++ instead of a JSFX heuristic.)
+
+    // 7 knobs: ATK, DEC, SUS, REL, GAIN, PAN, TUNE — sitting on the display bottom edge
+    knob_r = 13;
+    krow_y = wf_y + wf_h;  // knob centers sit right at display bottom
+    k_spacing = op_w / 8;
+
+    km_base = km_pads + oi * KM_PER_PAD * KS;
+
+    // ATK (0)
+    // ATK / DEC / REL knobs use LOG scaling so the low-end (1-100ms,
+    // the most musically useful range for drum samples) gets the bulk
+    // of the knob travel. Same approach as the ADSR drag nodes above.
+    // Implementation: normalize the time value to a 0..1 log position,
+    // run the knob in that normalized space, convert back on change.
+    k = 0; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    _atk_log_max = log(1000);
+    _atk_norm    = log(max(1, p_attack[oi])) / _atk_log_max;
+    _atk_def_n   = log(5)   / _atk_log_max;
+    _atk_new_n = ws_knob_interact(km, kcx, kcy, knob_r, _atk_norm, 0, 1, _atk_def_n);
+    _atk_new_n != _atk_norm ? (
+      p_attack[oi] = max(1, min(1000, exp(_atk_new_n * _atk_log_max)));
+      p_adsr_user[oi] = 1; recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+    );
+    ws_knob_draw(kcx, kcy, knob_r, _atk_norm, 0, 1, 0, km[0], 0.90, 0.66, 0.20, 0.25, 0.18, 0.06);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75, 1);
+    gfx_measurestr("ATK",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("ATK");
+    sprintf(#kv,"%.0f",p_attack[oi]); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // DEC (1)
+    k = 1; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    _dec_log_max = log(10000);
+    _dec_norm    = log(max(1, p_decay[oi])) / _dec_log_max;
+    _dec_def_n   = log(500) / _dec_log_max;
+    _dec_new_n = ws_knob_interact(km, kcx, kcy, knob_r, _dec_norm, 0, 1, _dec_def_n);
+    _dec_new_n != _dec_norm ? (
+      p_decay[oi] = max(1, min(10000, exp(_dec_new_n * _dec_log_max)));
+      p_adsr_user[oi] = 1; recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+    );
+    ws_knob_draw(kcx, kcy, knob_r, _dec_norm, 0, 1, 0, km[0], 0.90, 0.66, 0.20, 0.25, 0.18, 0.06);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75, 1);
+    gfx_measurestr("DEC",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("DEC");
+    sprintf(#kv,"%.0f",p_decay[oi]); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // SUS (2)
+    k = 2; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    nv = ws_knob_interact(km, kcx, kcy, knob_r, p_sustain[oi], 0, 1.0, 1.0);
+    nv != p_sustain[oi] ? (p_sustain[oi] = nv; p_adsr_user[oi] = 1; s_dirty[oi] = 1; mark_dirty_pad(oi););
+    ws_knob_draw(kcx, kcy, knob_r, p_sustain[oi], 0, 1.0, 0, km[0], 0.90, 0.66, 0.20, 0.25, 0.18, 0.06);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75, 1);
+    gfx_measurestr("SUS",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("SUS");
+    sprintf(#kv,"%.0f%%",p_sustain[oi]*100); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // REL (3) — log scaling, see ATK comment above
+    k = 3; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    _rel_log_max = log(5000);
+    _rel_norm    = log(max(1, p_release[oi])) / _rel_log_max;
+    _rel_def_n   = log(100) / _rel_log_max;
+    _rel_new_n = ws_knob_interact(km, kcx, kcy, knob_r, _rel_norm, 0, 1, _rel_def_n);
+    _rel_new_n != _rel_norm ? (
+      p_release[oi] = max(1, min(5000, exp(_rel_new_n * _rel_log_max)));
+      p_adsr_user[oi] = 1; recalc_pad(oi); s_dirty[oi] = 1; mark_dirty_pad(oi);
+    );
+    ws_knob_draw(kcx, kcy, knob_r, _rel_norm, 0, 1, 0, km[0], 0.90, 0.66, 0.20, 0.25, 0.18, 0.06);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75, 1);
+    gfx_measurestr("REL",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("REL");
+    sprintf(#kv,"%.0f",p_release[oi]); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // GAIN (4)
+    k = 4; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    nv = ws_knob_interact(km, kcx, kcy, knob_r, p_gain[oi], 0, 2.0, 1.0);
+    nv != p_gain[oi] ? (p_gain[oi] = nv; s_dirty[oi] = 1; mark_dirty_pad(oi););
+    ws_knob_draw(kcx, kcy, knob_r, p_gain[oi], 0, 2.0, 0, km[0], 0.40, 0.90, 0.45, 0.10, 0.24, 0.12);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("GAIN",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("GAIN");
+    sprintf(#kv,"%.1fdB", 20*log10(max(0.001, p_gain[oi]))); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // PAN (5)
+    k = 5; kcx = op_x + k_spacing * 0.5 + k * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    nv = ws_knob_interact(km, kcx, kcy, knob_r, p_pan[oi], -1.0, 1.0, 0);
+    nv != p_pan[oi] ? (p_pan[oi] = nv; p_panL[oi] = 1.0 - max(0.0, nv); p_panR[oi] = 1.0 + min(0.0, nv); mark_dirty_pad(oi););
+    ws_knob_draw(kcx, kcy, knob_r, p_pan[oi], -1.0, 1.0, 1, km[0], 0.70, 0.85, 0.30, 0.16, 0.22, 0.08);
+    gfx_setfont(1,"Arial",9,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("PAN",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("PAN");
+    p_pan[oi] == 0 ? strcpy(#kv, "C") : sprintf(#kv, "%s%.0f", p_pan[oi]<0?"L":"R", abs(p_pan[oi])*100);
+    gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // TUNE (6) — 7th column inline with other knobs
+    k = 6; kcx = op_x + k_spacing * 0.5 + 6 * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    nv = ws_knob_interact(km, kcx, kcy, knob_r, p_tune[oi], -24, 24, 0);
+    nv != p_tune[oi] ? (p_tune[oi] = nv; recalc_pad(oi); mark_dirty_pad(oi););
+    ws_knob_draw(kcx, kcy, knob_r, p_tune[oi], -24, 24, 1, km[0], 0.85, 0.45, 0.70, 0.22, 0.12, 0.18);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("TUNE",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("TUNE");
+    sprintf(#kv,"%+.0f", p_tune[oi]); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+    // OFS (7) — sample offset
+    k = 7; kcx = op_x + k_spacing * 0.5 + 7 * k_spacing; kcy = krow_y + knob_r + 2;
+    km = km_base + k * KS;
+    nv = ws_knob_interact(km, kcx, kcy, knob_r, p_sample_offset[oi], 0, 1.0, 0);
+    nv != p_sample_offset[oi] ? (p_sample_offset[oi] = nv; s_dirty[oi] = 1; mark_dirty_pad(oi););
+    ws_knob_draw(kcx, kcy, knob_r, p_sample_offset[oi], 0, 1.0, 0, km[0], 0.30, 0.80, 0.90, 0.08, 0.20, 0.24);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("OFS",tw,th); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+2; gfx_drawstr("OFS");
+    sprintf(#kv,"%.0f%%", p_sample_offset[oi]*100); gfx_measurestr(#kv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=kcx-tw/2; gfx_y=kcy+knob_r+10; gfx_drawstr(#kv);
+
+);
+
+function _ov_draw_eq_and_filters() (
+    // ── FX section: full-width EQ display + knobs below ───────────────────
+    fxk_r = 11;
+    fxk_y = krow_y + knob_r * 2 + 38;  // below ADSR knob row
+    fxk_base = km_fx + oi * KM_FX_PER_PAD * KS;
+
+    // Row label
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.50,0.52,0.55, 0.7);
+    gfx_x = op_x + 6; gfx_y = fxk_y - 2; gfx_drawstr("FX");
+
+    // ── Full-width EQ + filter response visualizer (biquad-based) ──
+    eq_dx = op_x + 10;
+    eq_dw = op_w - 20;
+    eq_dy = fxk_y; eq_dh = 56;
+    eq_cy = eq_dy + eq_dh / 2;   // center line = 0dB
+
+    // Background
+    gfx_set(0.06, 0.06, 0.08, 1); gfx_rect(eq_dx, eq_dy, eq_dw, eq_dh);
+    gfx_set(0.15, 0.16, 0.19, 1); gfx_rect(eq_dx, eq_dy, eq_dw, 1);
+    gfx_rect(eq_dx, eq_dy + eq_dh - 1, eq_dw, 1);
+    gfx_rect(eq_dx, eq_dy, 1, eq_dh);
+    gfx_rect(eq_dx + eq_dw - 1, eq_dy, 1, eq_dh);
+
+    // 0dB center line
+    gfx_set(0.25, 0.26, 0.30, 0.6);
+    gfx_line(eq_dx + 1, eq_cy, eq_dx + eq_dw - 2, eq_cy);
+
+    // ±6dB reference lines
+    _6db_py = eq_dh * 0.25;
+    gfx_set(0.18, 0.19, 0.22, 0.4);
+    gfx_line(eq_dx + 1, eq_cy - _6db_py, eq_dx + eq_dw - 2, eq_cy - _6db_py);
+    gfx_line(eq_dx + 1, eq_cy + _6db_py, eq_dx + eq_dw - 2, eq_cy + _6db_py);
+
+    // Freq→pixel mapping: log scale 20Hz–20kHz
+    _log_lo = 1.301; _log_range = 3.0;
+
+    // Draw combined biquad frequency response curve (HPF * LPF * Lo * Mid * Hi)
+    _peq_bq_base = bq_pad + oi * BQ_PER_PAD * BQ_STEREO_SIZE;
+    _peq_prev_x = -1; _peq_prev_y = -1;
+    _peq_px = 0;
+    _peq_yr = eq_dh / 2 - 3;
+    loop(60,
+      _peq_f = pow(10, _log_lo + (_peq_px / 59) * _log_range);
+      _peq_f = min(20000, _peq_f);
+      // Combined magnitude of all 5 biquads
+      _peq_mag = 1.0;
+      fx_hpf_freq[oi] > 25 ? _peq_mag *= bq_mag_at(_peq_bq_base + BQ_PAD_HPF * BQ_STEREO_SIZE, _peq_f);
+      fx_lpf_freq[oi] < 19500 ? _peq_mag *= bq_mag_at(_peq_bq_base + BQ_PAD_LPF * BQ_STEREO_SIZE, _peq_f);
+      (fx_eq_lo[oi] != 0) ? _peq_mag *= bq_mag_at(_peq_bq_base + BQ_PAD_LO * BQ_STEREO_SIZE, _peq_f);
+      (fx_eq_mid[oi] != 0) ? _peq_mag *= bq_mag_at(_peq_bq_base + BQ_PAD_MID * BQ_STEREO_SIZE, _peq_f);
+      (fx_eq_hi[oi] != 0) ? _peq_mag *= bq_mag_at(_peq_bq_base + BQ_PAD_HI * BQ_STEREO_SIZE, _peq_f);
+      _peq_db = _peq_mag > 0.001 ? 20 * log10(_peq_mag) : -24;
+      _peq_db = max(-24, min(24, _peq_db));
+      _peq_cur_x = eq_dx + 1 + (_peq_px / 59) * (eq_dw - 2);
+      _peq_cur_y = eq_cy - (_peq_db / 24) * _peq_yr;
+      _peq_cur_y = max(eq_dy + 1, min(eq_dy + eq_dh - 2, _peq_cur_y));
+
+      _peq_prev_x >= 0 ? (
+        // Fill between curve and 0dB
+        _peq_fy1 = min(eq_cy, _peq_cur_y);
+        _peq_fy2 = max(eq_cy, _peq_cur_y);
+        _peq_fy2 - _peq_fy1 > 0 ? (
+          gfx_set(pr * 0.3 + 0.1, pgg * 0.3 + 0.1, pb * 0.3 + 0.1, 0.15);
+          gfx_rect(_peq_cur_x, _peq_fy1, 1, _peq_fy2 - _peq_fy1);
+        );
+        // Curve line
+        gfx_set(pr * 0.5 + 0.4, pgg * 0.5 + 0.4, pb * 0.5 + 0.4, 0.85);
+        gfx_line(_peq_prev_x, _peq_prev_y, _peq_cur_x, _peq_cur_y);
+      );
+      _peq_prev_x = _peq_cur_x;
+      _peq_prev_y = _peq_cur_y;
+      _peq_px += 1;
+    );
+
+    // Freq reference labels
+    gfx_setfont(1,"Arial",7,0); gfx_set(0.35,0.37,0.40,0.5);
+    _ref_100 = eq_dx + (log10(100) - _log_lo) / _log_range * eq_dw;
+    _ref_1k  = eq_dx + (log10(1000) - _log_lo) / _log_range * eq_dw;
+    _ref_10k = eq_dx + (log10(10000) - _log_lo) / _log_range * eq_dw;
+    gfx_x = _ref_100 + 1; gfx_y = eq_dy + eq_dh - 9; gfx_drawstr("100");
+    gfx_x = _ref_1k + 1;  gfx_y = eq_dy + eq_dh - 9; gfx_drawstr("1k");
+    gfx_x = _ref_10k + 1; gfx_y = eq_dy + eq_dh - 9; gfx_drawstr("10k");
+
+    // HPF/LPF freq labels on display
+    gfx_setfont(1,"Arial",7,'b');
+    _hpf_px = fx_hpf_freq[oi] > 25 ? eq_dx + (log10(fx_hpf_freq[oi]) - _log_lo) / _log_range * eq_dw : eq_dx;
+    _lpf_px = fx_lpf_freq[oi] < 19500 ? eq_dx + (log10(fx_lpf_freq[oi]) - _log_lo) / _log_range * eq_dw : eq_dx + eq_dw;
+    fx_hpf_freq[oi] > 25 ? (
+      gfx_set(0.85, 0.35, 0.20, 0.8);
+      fx_hpf_freq[oi] >= 1000 ? sprintf(#fkv,"%.1fk",fx_hpf_freq[oi]/1000) : sprintf(#fkv,"%.0f",fx_hpf_freq[oi]);
+      gfx_measurestr(#fkv,tw,th);
+      gfx_x = max(eq_dx + 2, _hpf_px - tw - 2); gfx_y = eq_dy + 1; gfx_drawstr(#fkv);
+      // Vertical marker
+      gfx_set(0.85, 0.35, 0.20, 0.35);
+      gfx_line(_hpf_px, eq_dy + 1, _hpf_px, eq_dy + eq_dh - 2);
+    );
+    fx_lpf_freq[oi] < 19500 ? (
+      gfx_set(0.20, 0.55, 0.85, 0.8);
+      fx_lpf_freq[oi] >= 1000 ? sprintf(#fkv,"%.1fk",fx_lpf_freq[oi]/1000) : sprintf(#fkv,"%.0f",fx_lpf_freq[oi]);
+      gfx_measurestr(#fkv,tw,th);
+      gfx_x = min(eq_dx + eq_dw - tw - 2, _lpf_px + 2); gfx_y = eq_dy + 1; gfx_drawstr(#fkv);
+      gfx_set(0.20, 0.55, 0.85, 0.35);
+      gfx_line(_lpf_px, eq_dy + 1, _lpf_px, eq_dy + eq_dh - 2);
+    );
+
+    // ── Draggable EQ nodes on the response curve (with X+Y freq+gain drag) ──
+    _eq_nr = 5;
+    // Node positions: computed from per-pad filter frequencies on log scale
+    _lo_nx = eq_dx + (log10(fx_eq_lo_freq[oi]) - _log_lo) / _log_range * eq_dw;
+    _md_nx = eq_dx + (log10(fx_eq_mid_freq[oi]) - _log_lo) / _log_range * eq_dw;
+    _hi_nx = eq_dx + (log10(fx_eq_hi_freq[oi]) - _log_lo) / _log_range * eq_dw;
+    // Y position: map current dB gain to display
+    _eq_yr = eq_dh / 2 - 3;
+    _lo_ny = max(eq_dy + _eq_nr, min(eq_dy + eq_dh - _eq_nr, eq_cy - (fx_eq_lo[oi] / 12.0) * _eq_yr));
+    _md_ny = max(eq_dy + _eq_nr, min(eq_dy + eq_dh - _eq_nr, eq_cy - (fx_eq_mid[oi] / 12.0) * _eq_yr));
+    _hi_ny = max(eq_dy + _eq_nr, min(eq_dy + eq_dh - _eq_nr, eq_cy - (fx_eq_hi[oi] / 12.0) * _eq_yr));
+
+    // Draw nodes (filled circles)
+    gfx_set(0.85, 0.65, 0.20, 1); gfx_circle(_lo_nx, _lo_ny, _eq_nr, 1);
+    gfx_set(0, 0, 0, 0.5); gfx_circle(_lo_nx, _lo_ny, _eq_nr, 0);
+    gfx_set(0.70, 0.85, 0.30, 1); gfx_circle(_md_nx, _md_ny, _eq_nr, 1);
+    gfx_set(0, 0, 0, 0.5); gfx_circle(_md_nx, _md_ny, _eq_nr, 0);
+    gfx_set(0.30, 0.70, 0.85, 1); gfx_circle(_hi_nx, _hi_ny, _eq_nr, 1);
+    gfx_set(0, 0, 0, 0.5); gfx_circle(_hi_nx, _hi_ny, _eq_nr, 0);
+
+    // EQ node hit detection (BEFORE knobs so nodes get click priority)
+    active_id == -1 && lmb_down && mx >= eq_dx && mx <= eq_dx + eq_dw && my >= eq_dy && my <= eq_dy + eq_dh ? (
+      eq_drag_my = my; eq_drag_mx = mx;
+      _hit_node = -1;
+      dist(mx, my, _lo_nx, _lo_ny) <= _eq_nr + 4 ? (
+        _hit_node = 220; eq_drag_val_lo = fx_eq_lo[oi];
+      ) : dist(mx, my, _md_nx, _md_ny) <= _eq_nr + 4 ? (
+        _hit_node = 221; eq_drag_val_md = fx_eq_mid[oi];
+      ) : dist(mx, my, _hi_nx, _hi_ny) <= _eq_nr + 4 ? (
+        _hit_node = 222; eq_drag_val_hi = fx_eq_hi[oi];
+      );
+      _hit_node >= 0 ? (
+        _eq_now = time_precise();
+        _dbl_click_id == _hit_node && (_eq_now - _dbl_click_time) < DBL_CLICK_T ? (
+          // Double-click: reset gain to 0 dB and freq to default
+          _hit_node == 220 ? ( fx_eq_lo[oi] = 0; fx_eq_lo_freq[oi] = 200; ) :
+          _hit_node == 221 ? ( fx_eq_mid[oi] = 0; fx_eq_mid_freq[oi] = 1000; ) :
+          ( fx_eq_hi[oi] = 0; fx_eq_hi_freq[oi] = 5000; );
+          recalc_fx(oi); mark_dirty_pad(oi);
+          _dbl_click_id = -1;
+        ) : (
+          active_id = _hit_node;
+          _dbl_click_id = _hit_node; _dbl_click_time = _eq_now;
+        );
+      );
+    );
+
+    // (HPF / LPF knobs moved to _ov_draw_fx_knobs — full-size SSL in FILTERS section)
+
+    // dB value labels on nodes (only when non-zero)
+    gfx_setfont(1,"Arial",7,'b');
+    fx_eq_lo[oi] != 0 ? (
+      gfx_set(0.85, 0.65, 0.20, 0.9);
+      sprintf(#fkv,"%+.0f",fx_eq_lo[oi]);
+      gfx_measurestr(#fkv,tw,th);
+      gfx_x = _lo_nx - tw/2; gfx_y = _lo_ny < eq_cy ? _lo_ny - th - 2 : _lo_ny + _eq_nr + 1;
+      gfx_drawstr(#fkv);
+    );
+    fx_eq_mid[oi] != 0 ? (
+      gfx_set(0.70, 0.85, 0.30, 0.9);
+      sprintf(#fkv,"%+.0f",fx_eq_mid[oi]);
+      gfx_measurestr(#fkv,tw,th);
+      gfx_x = _md_nx - tw/2; gfx_y = _md_ny < eq_cy ? _md_ny - th - 2 : _md_ny + _eq_nr + 1;
+      gfx_drawstr(#fkv);
+    );
+    fx_eq_hi[oi] != 0 ? (
+      gfx_set(0.30, 0.70, 0.85, 0.9);
+      sprintf(#fkv,"%+.0f",fx_eq_hi[oi]);
+      gfx_measurestr(#fkv,tw,th);
+      gfx_x = _hi_nx - tw/2; gfx_y = _hi_ny < eq_cy ? _hi_ny - th - 2 : _hi_ny + _eq_nr + 1;
+      gfx_drawstr(#fkv);
+    );
+
+    // EQ node drag interaction (IDs: 220=lo, 221=mid, 222=hi) with X+Y freq+gain drag
+    // Must call recalc_fx(oi) so biquad coefficients update for both DSP and visualization.
+    active_id == 220 ? (
+      LMB ? (
+        // Y drag: gain
+        fx_eq_lo[oi] = max(-12, min(12, eq_drag_val_lo - (my - eq_drag_my) / _eq_yr * 12));
+        // X drag: frequency (log mapping)
+        fx_eq_lo_freq[oi] = pow(10.0, _log_lo + (mx - eq_dx) / eq_dw * _log_range);
+        fx_eq_lo_freq[oi] = max(40, min(500, fx_eq_lo_freq[oi]));  // clamp to range
+        recalc_fx(oi); mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+    active_id == 221 ? (
+      LMB ? (
+        fx_eq_mid[oi] = max(-12, min(12, eq_drag_val_md - (my - eq_drag_my) / _eq_yr * 12));
+        fx_eq_mid_freq[oi] = pow(10.0, _log_lo + (mx - eq_dx) / eq_dw * _log_range);
+        fx_eq_mid_freq[oi] = max(200, min(8000, fx_eq_mid_freq[oi]));  // clamp to range
+        recalc_fx(oi); mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+    active_id == 222 ? (
+      LMB ? (
+        fx_eq_hi[oi] = max(-12, min(12, eq_drag_val_hi - (my - eq_drag_my) / _eq_yr * 12));
+        fx_eq_hi_freq[oi] = pow(10.0, _log_lo + (mx - eq_dx) / eq_dw * _log_range);
+        fx_eq_hi_freq[oi] = max(2000, min(16000, fx_eq_hi_freq[oi]));  // clamp to range
+        recalc_fx(oi); mark_dirty_pad(oi);
+      ) : active_id = -1;
+    );
+
+);
+
+function _ov_draw_fx_knobs() (
+    // ── Two-row FX layout ───────────────────────────────────────────────
+    // Row 1 (SSL):     [HPF LPF RESO] | [RATE BITS DRIVE COMP]  (7 knobs)
+    // Row 2 (Encoder): [DLY RVB]  centered                      (2 knobs)
+    fxk_r = 11;
+    _fxk_top = eq_dy + eq_dh + 4;
+    _r1_sp = op_w / 7;   // Row 1: 7 evenly spaced slots
+    fxk_base = km_fx + oi * KM_FX_PER_PAD * KS;
+
+    // ── Row 1 headers ──
+    gfx_setfont(1,"Arial",9,'b');
+    gfx_set(0.58, 0.60, 0.68, 0.9);
+    gfx_measurestr("FILTERS",tw,th);
+    gfx_x = op_x + _r1_sp * 1.5 - tw/2; gfx_y = _fxk_top; gfx_drawstr("FILTERS");
+    gfx_measurestr("FX",tw,th);
+    gfx_x = op_x + _r1_sp * 5.0 - tw/2; gfx_y = _fxk_top; gfx_drawstr("FX");
+
+    _fxk_knob_y = _fxk_top + 10;
+
+    // ── Vertical divider: FILTERS | FX ──
+    gfx_set(0.22, 0.23, 0.28, 0.5);
+    gfx_rect(op_x + _r1_sp * 3 - 1, _fxk_top, 2, _fxk_knob_y + fxk_r * 2 + 20 - _fxk_top);
+
+    // ================================================================
+    // SECTION 1: FILTERS  (SSL knobs, blue/cyan caps)
+    // ================================================================
+
+    // HPF — SSL blue cap (log-scaled frequency)
+    fkcx = op_x + _r1_sp * 0.5; fkcy = _fxk_knob_y + fxk_r + 2;
+    fkm = fxk_base + 0 * KS;
+    _o_hpf_active = fx_hpf_freq[oi] > 25;
+    _phf_log = log10(max(20, fx_hpf_freq[oi]));
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, _phf_log, log10(20), log10(8000), log10(20), 0);
+    nv != _phf_log ? (
+      fx_hpf_freq[oi] = pow(10, nv);
+      fx_hpf_freq[oi] <= 25 ? fx_hpf_freq[oi] = 20;
+      recalc_fx(oi); mark_dirty_pad(oi);
+    );
+    ssl_knob_draw(fkcx, fkcy, fxk_r, _phf_log, log10(20), log10(8000), 0, fkm[0],
+      _o_hpf_active ? 0.35 : 0.30, _o_hpf_active ? 0.65 : 0.35, _o_hpf_active ? 0.90 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("HPF",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("HPF");
+    fx_hpf_freq[oi] > 25 ? (
+      fx_hpf_freq[oi] >= 1000 ? sprintf(#fkv,"%.1fk",fx_hpf_freq[oi]/1000) : sprintf(#fkv,"%.0f",fx_hpf_freq[oi]);
+    ) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // LPF — SSL blue cap (log-scaled frequency)
+    fkcx = op_x + _r1_sp * 1.5;
+    fkm = fxk_base + 1 * KS;
+    _o_lpf_active = fx_lpf_freq[oi] < 19500;
+    _plf_log = log10(max(200, fx_lpf_freq[oi]));
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, _plf_log, log10(200), log10(20000), log10(20000), 0);
+    nv != _plf_log ? (
+      fx_lpf_freq[oi] = pow(10, nv);
+      fx_lpf_freq[oi] >= 19500 ? fx_lpf_freq[oi] = 20000;
+      recalc_fx(oi); mark_dirty_pad(oi);
+    );
+    ssl_knob_draw(fkcx, fkcy, fxk_r, _plf_log, log10(200), log10(20000), 0, fkm[0],
+      _o_lpf_active ? 0.35 : 0.30, _o_lpf_active ? 0.65 : 0.35, _o_lpf_active ? 0.90 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("LPF",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("LPF");
+    fx_lpf_freq[oi] < 19500 ? (
+      fx_lpf_freq[oi] >= 1000 ? sprintf(#fkv,"%.1fk",fx_lpf_freq[oi]/1000) : sprintf(#fkv,"%.0f",fx_lpf_freq[oi]);
+    ) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // RESO — SSL cyan cap (shared Q for HPF + LPF, 0.707=Butterworth .. 12)
+    fkcx = op_x + _r1_sp * 2.5;
+    fkm = fxk_base + 2 * KS;
+    _reso_active = fx_reso[oi] > 0.75;
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, fx_reso[oi], 0.707, 12.0, 0.707, 0);
+    nv != fx_reso[oi] ? (fx_reso[oi] = nv; recalc_fx(oi); mark_dirty_pad(oi););
+    ssl_knob_draw(fkcx, fkcy, fxk_r, fx_reso[oi], 0.707, 12.0, 0, fkm[0],
+      _reso_active ? 0.20 : 0.30, _reso_active ? 0.85 : 0.35, _reso_active ? 0.75 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("RESO",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("RESO");
+    fx_reso[oi] > 0.75 ? sprintf(#fkv,"%.1f",fx_reso[oi]) : strcpy(#fkv,"FLAT");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // ================================================================
+    // SECTION 2: FX  (SSL knobs, teal/red/orange caps)
+    // ================================================================
+
+    // RATE — SSL teal cap (bitcrush rate 0-1)
+    fkcx = op_x + _r1_sp * 3.5;
+    fkm = fxk_base + 6 * KS;
+    _bc_rate_on = fx_bc_rate[oi] > 0.01;
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, fx_bc_rate[oi], 0, 1.0, 0, 0);
+    nv != fx_bc_rate[oi] ? (fx_bc_rate[oi] = nv; recalc_fx(oi); mark_dirty_pad(oi););
+    ssl_knob_draw(fkcx, fkcy, fxk_r, fx_bc_rate[oi], 0, 1.0, 0, fkm[0],
+      _bc_rate_on ? 0.20 : 0.30, _bc_rate_on ? 0.85 : 0.35, _bc_rate_on ? 0.65 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("RATE",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("RATE");
+    fx_bc_rate[oi] > 0.01 ? sprintf(#fkv,"%.0f%%", fx_bc_rate[oi] * 100) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // BITS — SSL teal cap (bitcrush depth 1-16)
+    fkcx = op_x + _r1_sp * 4.5;
+    fkm = fxk_base + 7 * KS;
+    _bc_bits_on = fx_bc_bits[oi] < 15.5;
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, fx_bc_bits[oi], 1, 16, 16, 0);
+    nv != fx_bc_bits[oi] ? (fx_bc_bits[oi] = floor(nv + 0.5); recalc_fx(oi); mark_dirty_pad(oi););
+    ssl_knob_draw(fkcx, fkcy, fxk_r, fx_bc_bits[oi], 1, 16, 0, fkm[0],
+      _bc_bits_on ? 0.20 : 0.30, _bc_bits_on ? 0.85 : 0.35, _bc_bits_on ? 0.65 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("BITS",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("BITS");
+    fx_bc_bits[oi] < 15.5 ? sprintf(#fkv,"%d", fx_bc_bits[oi] | 0) : strcpy(#fkv,"16");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // DRIVE — SSL cap colored per drive mode + mode pill
+    fkcx = op_x + _r1_sp * 5.5;
+    fkm = fxk_base + 5 * KS;
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, fx_sat_drv[oi], 0, 1.0, 0, 0);
+    nv != fx_sat_drv[oi] ? (fx_sat_drv[oi] = nv; mark_dirty_pad(oi););
+    _dm = fx_drv_mode[oi] | 0;
+    _dm == 0 ? ( _dkr=0.85; _dkg=0.25; _dkb=0.25; ) :  // SOFT
+    _dm == 1 ? ( _dkr=0.90; _dkg=0.60; _dkb=0.15; ) :  // TUBE
+    _dm == 2 ? ( _dkr=0.70; _dkg=0.55; _dkb=0.30; ) :  // TAPE
+    _dm == 3 ? ( _dkr=0.90; _dkg=0.20; _dkb=0.55; ) :  // FUZZ
+              ( _dkr=0.50; _dkg=0.75; _dkb=0.90; );     // CLIP
+    ssl_knob_draw(fkcx, fkcy, fxk_r, fx_sat_drv[oi], 0, 1.0, 0, fkm[0], _dkr, _dkg, _dkb, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("DRIVE",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("DRIVE");
+    sprintf(#fkv,"%.0f%%",fx_sat_drv[oi]*100); gfx_measurestr(#fkv,tw,th);
+    gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+    // Drive mode clickable pill
+    _dm == 0 ? strcpy(#dml, "SOFT") :
+    _dm == 1 ? strcpy(#dml, "TUBE") :
+    _dm == 2 ? strcpy(#dml, "TAPE") :
+    _dm == 3 ? strcpy(#dml, "FUZZ") :
+               strcpy(#dml, "CLIP");
+    gfx_setfont(1,"Arial",7,'b');
+    gfx_measurestr(#dml,tw,th);
+    _dml_x = fkcx - tw/2 - 3; _dml_y = fkcy + fxk_r + 19;
+    _dml_w = tw + 6; _dml_h = th + 2;
+    gfx_set(_dkr * 0.3, _dkg * 0.3, _dkb * 0.3, 0.8);
+    gfx_rect(_dml_x, _dml_y, _dml_w, _dml_h);
+    gfx_set(_dkr, _dkg, _dkb, 1);
+    gfx_x = fkcx - tw/2; gfx_y = _dml_y + 1;
+    gfx_drawstr(#dml);
+    lmb_down && mx >= _dml_x && mx <= _dml_x + _dml_w && my >= _dml_y && my <= _dml_y + _dml_h ? (
+      fx_drv_mode[oi] = ((_dm + 1) % 5);
+      mark_dirty_pad(oi);
+    );
+
+    // COMP — SSL orange cap + mode pill
+    fkcx = op_x + _r1_sp * 6.5;
+    fkm = fxk_base + 10 * KS;
+    _cmp_on = fx_cmp_amt[oi] > 0.01;
+    nv = ssl_knob_interact(fkm, fkcx, fkcy, fxk_r, fx_cmp_amt[oi], 0, 1.0, 0, 0);
+    // recalc_fx() is required: amt drives threshold + auto-makeup (set in
+    // recalc_pad_comp), so changing amt must rebuild the comp coefficients
+    // for the change to be audible. Other FX knobs (resonance/bitcrush/etc)
+    // do the same.
+    nv != fx_cmp_amt[oi] ? (fx_cmp_amt[oi] = nv; recalc_fx(oi); mark_dirty_pad(oi););
+    ssl_knob_draw(fkcx, fkcy, fxk_r, fx_cmp_amt[oi], 0, 1.0, 0, fkm[0],
+      _cmp_on ? 0.90 : 0.30, _cmp_on ? 0.55 : 0.35, _cmp_on ? 0.15 : 0.40, 0);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("COMP",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("COMP");
+    fx_cmp_amt[oi] > 0.01 ? sprintf(#fkv,"%.0f%%", fx_cmp_amt[oi] * 100) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+    // Comp mode clickable pill
+    _cm = fx_cmp_mode[oi] | 0;
+    _cm == 0 ? ( strcpy(#cml, "PUNCH"); _ckr=0.95; _ckg=0.50; _ckb=0.10; ) :
+    _cm == 1 ? ( strcpy(#cml, "GLUE");  _ckr=0.80; _ckg=0.70; _ckb=0.30; ) :
+               ( strcpy(#cml, "SQUASH"); _ckr=0.90; _ckg=0.25; _ckb=0.10; );
+    gfx_setfont(1,"Arial",7,'b');
+    gfx_measurestr(#cml,tw,th);
+    _cml_x = fkcx - tw/2 - 3; _cml_y = fkcy + fxk_r + 19;
+    _cml_w = tw + 6; _cml_h = th + 2;
+    gfx_set(_ckr * 0.3, _ckg * 0.3, _ckb * 0.3, 0.8);
+    gfx_rect(_cml_x, _cml_y, _cml_w, _cml_h);
+    gfx_set(_ckr, _ckg, _ckb, 1);
+    gfx_x = fkcx - tw/2; gfx_y = _cml_y + 1;
+    gfx_drawstr(#cml);
+    lmb_down && mx >= _cml_x && mx <= _cml_x + _cml_w && my >= _cml_y && my <= _cml_y + _cml_h ? (
+      fx_cmp_mode[oi] = ((_cm + 1) % 3);
+      recalc_fx(oi);
+      mark_dirty_pad(oi);
+    );
+
+    // ================================================================
+    // ROW 2: SENDS  (Encoder knobs, centered on dedicated row)
+    // ================================================================
+    _r2_top = _fxk_knob_y + fxk_r * 2 + 36;
+
+    // Horizontal divider between rows
+    gfx_set(0.22, 0.23, 0.28, 0.5);
+    gfx_rect(op_x + 20, _r2_top - 5, op_w - 40, 2);
+
+    // SENDS header (centered)
+    gfx_setfont(1,"Arial",9,'b');
+    gfx_set(0.58, 0.60, 0.68, 0.9);
+    gfx_measurestr("SENDS",tw,th);
+    gfx_x = op_x + op_w / 2 - tw / 2; gfx_y = _r2_top; gfx_drawstr("SENDS");
+
+    _r2_knob_y = _r2_top + 10;
+    fkcy = _r2_knob_y + fxk_r + 2;
+
+    // DLY — Encoder with blue LEDs (centered left)
+    fkcx = op_x + op_w / 3;
+    fkm = fxk_base + 8 * KS;
+    _dly_on = fx_snd_dly[oi] > 0.005;
+    nv = encoder_interact(fkm, fkcx, fkcy, fxk_r, fx_snd_dly[oi], 0, 1.0, 0, 0);
+    nv != fx_snd_dly[oi] ? (fx_snd_dly[oi] = nv; mark_dirty_pad(oi););
+    encoder_draw(fkcx, fkcy, fxk_r, fx_snd_dly[oi], 0, 1.0, fkm[0],
+      _dly_on ? 0.35 : 0.20, _dly_on ? 0.65 : 0.25, _dly_on ? 0.90 : 0.30);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("DLY",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("DLY");
+    fx_snd_dly[oi] > 0.005 ? sprintf(#fkv,"%.0f%%", fx_snd_dly[oi]*100) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+    // RVB — Encoder with purple LEDs (centered right)
+    fkcx = op_x + op_w * 2 / 3;
+    fkm = fxk_base + 9 * KS;
+    _rvb_on = fx_snd_rvb[oi] > 0.005;
+    nv = encoder_interact(fkm, fkcx, fkcy, fxk_r, fx_snd_rvb[oi], 0, 1.0, 0, 0);
+    nv != fx_snd_rvb[oi] ? (fx_snd_rvb[oi] = nv; mark_dirty_pad(oi););
+    encoder_draw(fkcx, fkcy, fxk_r, fx_snd_rvb[oi], 0, 1.0, fkm[0],
+      _rvb_on ? 0.55 : 0.20, _rvb_on ? 0.35 : 0.25, _rvb_on ? 0.85 : 0.30);
+    gfx_setfont(1,"Arial",8,'b'); gfx_set(0.70,0.72,0.75,1);
+    gfx_measurestr("RVB",tw,th); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+2; gfx_drawstr("RVB");
+    fx_snd_rvb[oi] > 0.005 ? sprintf(#fkv,"%.0f%%", fx_snd_rvb[oi]*100) : strcpy(#fkv,"OFF");
+    gfx_measurestr(#fkv,tw,th); gfx_set(0.55,0.57,0.60,1); gfx_x=fkcx-tw/2; gfx_y=fkcy+fxk_r+10; gfx_drawstr(#fkv);
+
+);
+
+function _ov_draw_buttons() (
+    // ── Button rows: Row 1 = OUT/LEARN/CHOKE/1SHOT/REV, Row 2 = SKIP/NORM/EXPT
+    ob_h = 20; ob_w = 46; ob_gap = 6;
+    ob_y1 = op_y + op_h - 66;  // top button row
+    ob_y2 = op_y + op_h - 38;  // bottom button row
+
+    // ── Row 1: OUT, LEARN, CHOKE (left), 1SHOT, REV (right) ──────
+    // OUTPUT bus selector
+    out_bx = op_x + 10; out_bw = 50;
+    multi_out ? gfx_set(0.10, 0.70, 0.85, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(out_bx, ob_y1, out_bw, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(out_bx,ob_y1,out_bw,1); gfx_rect(out_bx,ob_y1,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(out_bx,ob_y1+ob_h-1,out_bw,1); gfx_rect(out_bx+out_bw-1,ob_y1,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    hsl_to_rgb(p_output[oi] / 16.0, 0.65, 0.60);
+    gfx_set(_hsl_r, _hsl_g, _hsl_b, 1);
+    sprintf(#out_lbl, "Out %d", p_output[oi] + 1);
+    gfx_measurestr(#out_lbl,tw,th); gfx_x=out_bx+(out_bw-tw)/2; gfx_y=ob_y1+(ob_h-th)/2; gfx_drawstr(#out_lbl);
+    _in_out_btn = mx>=out_bx&&mx<=out_bx+out_bw&&my>=ob_y1&&my<=ob_y1+ob_h;
+    // Left-click: open popup menu to choose output bus
+    _in_out_btn && lmb_down ? (
+      resp = gfx_showmenu("Out 1|Out 2|Out 3|Out 4|Out 5|Out 6|Out 7|Out 8|Out 9|Out 10|Out 11|Out 12|Out 13|Out 14|Out 15|Out 16");
+      resp > 0 ? ( p_output[oi] = resp - 1; mark_dirty_pad(oi); );
+    );
+    // Scroll wheel: cycle output bus
+    _in_out_btn && frame_wheel != 0 ? (
+      p_output[oi] = (p_output[oi] + sign_of(frame_wheel) + 16) % 16;
+      mark_dirty_pad(oi);
+    );
+
+    // LEARN button
+    lrn_bx = out_bx + out_bw + ob_gap; lrn_bw = 50;
+    midi_learn_pad == oi ? gfx_set(1, 0.3, 0.3, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(lrn_bx, ob_y1, lrn_bw, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(lrn_bx,ob_y1,lrn_bw,1); gfx_rect(lrn_bx,ob_y1,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(lrn_bx,ob_y1+ob_h-1,lrn_bw,1); gfx_rect(lrn_bx+lrn_bw-1,ob_y1,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    midi_learn_pad == oi ? gfx_set(1,1,1,1) : gfx_set(0.65,0.67,0.70,1);
+    gfx_measurestr("LEARN",tw,th); gfx_x=lrn_bx+(lrn_bw-tw)/2; gfx_y=ob_y1+(ob_h-th)/2; gfx_drawstr("LEARN");
+    mx>=lrn_bx&&mx<=lrn_bx+lrn_bw&&my>=ob_y1&&my<=ob_y1+ob_h&&lmb_down?(
+      midi_learn_pad == oi ? midi_learn_pad = -1 : midi_learn_pad = oi;
+    );
+
+    // CHOKE group button (click to cycle 0=OFF, 1-8)
+    chk_bx = lrn_bx + lrn_bw + ob_gap; chk_bw = 52;
+    p_choke[oi] > 0 ? gfx_set(0.85, 0.30, 0.30, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(chk_bx, ob_y1, chk_bw, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(chk_bx,ob_y1,chk_bw,1); gfx_rect(chk_bx,ob_y1,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(chk_bx,ob_y1+ob_h-1,chk_bw,1); gfx_rect(chk_bx+chk_bw-1,ob_y1,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    p_choke[oi] > 0 ? gfx_set(1,1,1,1) : gfx_set(0.65,0.67,0.70,1);
+    p_choke[oi] > 0 ? sprintf(#chk_lbl, "CHK %d", p_choke[oi]) : strcpy(#chk_lbl, "CHOKE");
+    gfx_measurestr(#chk_lbl,tw,th); gfx_x=chk_bx+(chk_bw-tw)/2; gfx_y=ob_y1+(ob_h-th)/2; gfx_drawstr(#chk_lbl);
+    mx>=chk_bx&&mx<=chk_bx+chk_bw&&my>=ob_y1&&my<=ob_y1+ob_h&&lmb_down?(
+      resp = gfx_showmenu("OFF|Group 1|Group 2|Group 3|Group 4|Group 5|Group 6|Group 7|Group 8");
+      resp > 0 ? ( p_choke[oi] = resp - 1; mark_dirty_pad(oi); );
+    );
+
+    // 1SHOT / GATE / GLOBAL button — tri-state (right-aligned in row 1)
+    // -1 = follow global, 0 = gate (forced), 1 = one-shot (forced)
+    os_bw = 52;
+    rev_bw = 40;
+    os_bx = op_x + op_w - 10 - rev_bw - ob_gap - os_bw;
+    _os_val = p_oneshot[oi];
+    _os_val > 0 ? gfx_set(0.85, 0.65, 0.10, 1) :    // amber = 1SHOT
+    _os_val == 0 ? gfx_set(0.20, 0.21, 0.25, 1) :    // dark = GATE
+                   gfx_set(0.20, 0.55, 0.50, 1);      // teal = GLOBAL
+    gfx_rect(os_bx, ob_y1, os_bw, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(os_bx,ob_y1,os_bw,1); gfx_rect(os_bx,ob_y1,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(os_bx,ob_y1+ob_h-1,os_bw,1); gfx_rect(os_bx+os_bw-1,ob_y1,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    _os_val > 0 ? gfx_set(0,0,0,1) :
+    _os_val == 0 ? gfx_set(0.65,0.67,0.70,1) :
+                   gfx_set(1,1,1,1);
+    _os_val < 0 ? strcpy(#os_lbl, "GLOBAL") :
+    _os_val > 0 ? strcpy(#os_lbl, "1SHOT") :
+                  strcpy(#os_lbl, "GATE");
+    gfx_measurestr(#os_lbl,tw,th); gfx_x=os_bx+(os_bw-tw)/2; gfx_y=ob_y1+(ob_h-th)/2; gfx_drawstr(#os_lbl);
+    // Left-click: cycle -1 → 1 → 0 → -1
+    mx>=os_bx&&mx<=os_bx+os_bw&&my>=ob_y1&&my<=ob_y1+ob_h&&lmb_down?(
+      _os_val < 0 ? p_oneshot[oi] = 1 :
+      _os_val > 0 ? p_oneshot[oi] = 0 :
+                    p_oneshot[oi] = -1;
+      mark_dirty_pad(oi);
+    );
+    // Right-click: direct selection menu
+    mx>=os_bx&&mx<=os_bx+os_bw&&my>=ob_y1&&my<=ob_y1+ob_h&&rmb_down?(
+      resp = gfx_showmenu("Follow Global|One-Shot|Gate");
+      resp == 1 ? p_oneshot[oi] = -1;
+      resp == 2 ? p_oneshot[oi] = 1;
+      resp == 3 ? p_oneshot[oi] = 0;
+      resp > 0 ? mark_dirty_pad(oi);
+    );
+
+    // REV button (rightmost in row 1)
+    rev_bx = op_x + op_w - 10 - rev_bw;
+    p_reverse[oi] ? gfx_set(0.70, 0.20, 0.85, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(rev_bx, ob_y1, rev_bw, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(rev_bx,ob_y1,rev_bw,1); gfx_rect(rev_bx,ob_y1,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(rev_bx,ob_y1+ob_h-1,rev_bw,1); gfx_rect(rev_bx+rev_bw-1,ob_y1,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    p_reverse[oi] ? gfx_set(1,1,1,1) : gfx_set(0.65,0.67,0.70,1);
+    gfx_measurestr("REV",tw,th); gfx_x=rev_bx+(rev_bw-tw)/2; gfx_y=ob_y1+(ob_h-th)/2; gfx_drawstr("REV");
+    mx>=rev_bx&&mx<=rev_bx+rev_bw&&my>=ob_y1&&my<=ob_y1+ob_h&&lmb_down?(
+      p_reverse[oi] = !p_reverse[oi]; s_dirty[oi] = 1; mark_dirty_pad(oi);
+    );
+
+    // ── Row 2: Clear Layer, Clear Pad (right-aligned, wider buttons) ───
+    _clr_w = 95; _clr_gap = 6;
+    ob_x0 = op_x + op_w - (_clr_w * 2 + _clr_gap) - 10;
+
+    // CLEAR LAYER
+    obx = ob_x0;
+    _has_layer_audio = 0;
+    p_layer_cnt[oi] > 0 ? (
+      _has_layer_audio = l_len[oi * MAX_LAYERS + overlay_layer] > 0;
+    ) : (
+      _has_layer_audio = (overlay_layer == 0 && s_len[oi] > 0);
+    );
+    _has_layer_audio ? gfx_set(0.75, 0.35, 0.20, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(obx, ob_y2, _clr_w, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(obx,ob_y2,_clr_w,1); gfx_rect(obx,ob_y2,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(obx,ob_y2+ob_h-1,_clr_w,1); gfx_rect(obx+_clr_w-1,ob_y2,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    _has_layer_audio ? gfx_set(1,1,1,1) : gfx_set(0.50,0.52,0.55,1);
+    strcpy(#_clrl_lbl, "Clear Layer");
+    gfx_measurestr(#_clrl_lbl,tw,th); gfx_x=obx+(_clr_w-tw)/2; gfx_y=ob_y2+(ob_h-th)/2; gfx_drawstr(#_clrl_lbl);
+    mx>=obx&&mx<=obx+_clr_w&&my>=ob_y2&&my<=ob_y2+ob_h&&lmb_down && _has_layer_audio ? (
+      gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+        // UNDO_DESC=7 → "Swing: Clear Layer" (was =2 "Clear Pad").
+        gmem[KIT_GMEM_UNDO_DESC] = 7; gmem[KIT_GMEM_CMD] = 46;
+        _undo_pending = 3; _undo_pad = oi; _undo_layer = overlay_layer;
+      ) : (
+        p_layer_cnt[oi] > 0 ? (
+          clear_layer(oi, overlay_layer);
+        ) : (
+          s_len[oi] = 0; s_start[oi] = 0; s_end[oi] = 1.0;
+          s_sr[oi] = 0; s_norm[oi] = 0; s_norm_gain[oi] = 1.0;
+          strcpy(get_name_slot(oi), "");
+          strcpy(get_path_slot(oi), "");
+        );
+        // Clearing a layer changes the effective RR sequence; reset
+        // cursor so the next hit starts at position 1.
+        p_rr_idx[oi] = 0;
+        s_dirty[oi] = 1; mark_dirty_pad(oi);
+      );
+    );
+
+    // CLEAR PAD (all layers + FX)
+    obx = ob_x0 + _clr_w + _clr_gap;
+    pad_has_audio(oi) ? gfx_set(0.75, 0.25, 0.20, 1) : gfx_set(0.20, 0.21, 0.25, 1);
+    gfx_rect(obx, ob_y2, _clr_w, ob_h);
+    gfx_set(0.28,0.30,0.34,0.5); gfx_rect(obx,ob_y2,_clr_w,1); gfx_rect(obx,ob_y2,1,ob_h);
+    gfx_set(0.07,0.07,0.08,0.8); gfx_rect(obx,ob_y2+ob_h-1,_clr_w,1); gfx_rect(obx+_clr_w-1,ob_y2,1,ob_h);
+    gfx_setfont(1,"Arial",9,'b');
+    pad_has_audio(oi) ? gfx_set(1,1,1,1) : gfx_set(0.65,0.67,0.70,1);
+    gfx_measurestr("Clear Pad",tw,th); gfx_x=obx+(_clr_w-tw)/2; gfx_y=ob_y2+(ob_h-th)/2; gfx_drawstr("Clear Pad");
+    mx>=obx&&mx<=obx+_clr_w&&my>=ob_y2&&my<=ob_y2+ob_h&&lmb_down && pad_has_audio(oi) ? (
+      resp = gfx_showmenu("Clear Pad (all layers + FX)|---| ");
+      resp == 1 ? (
+        gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+          gmem[KIT_GMEM_UNDO_DESC] = 2; gmem[KIT_GMEM_CMD] = 46;
+          _undo_pending = 2; _undo_pad = oi;
+        ) : (
+          clear_pad(oi);
+        );
+        overlay_pad = -1;
+      );
+    );
+);
+

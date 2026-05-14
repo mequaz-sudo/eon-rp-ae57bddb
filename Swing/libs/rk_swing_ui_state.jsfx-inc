@@ -1,0 +1,1328 @@
+// rk_swing_ui_state.jsfx-inc
+// Swing UI state machines + frame setup + header + LCD frame
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function swing_ui_process_undo() (
+_undo_pending > 0 && gmem[KIT_GMEM_UNDO_ACK] == 1 ? (
+  _undo_pending == 1 ? (
+    // CLEAR ALL — pads only. Kit name + FX chain preserved (vs. NEW which
+    // wipes everything via _undo_pending == 6 → swing_new_kit_full_reset).
+    gi = 0; loop(NUM_PADS, clear_pad(gi); recalc_pad(gi); s_dirty[gi] = 1; gi += 1;);
+  ) : _undo_pending == 2 ? (
+    _undo_pad >= 0 && _undo_pad < NUM_PADS ? clear_pad(_undo_pad);
+  ) : _undo_pending == 6 ? (
+    // NEW KIT — full reset (pads + name + FX). See rk_swing_defaults.jsfx-inc.
+    swing_new_kit_full_reset();
+  ) : _undo_pending == 3 ? (
+    _undo_pad >= 0 && _undo_pad < NUM_PADS && _undo_layer >= 0 && _undo_layer < MAX_LAYERS ? (
+      clear_layer(_undo_pad, _undo_layer);
+      // Clearing a layer changes the effective RR sequence; reset cursor
+      // so the next hit starts at position 1. Mirrors the synchronous
+      // path in rk_swing_ui_grid_overlay.jsfx-inc / overlay_fx.
+      p_rr_idx[_undo_pad] = 0;
+      s_dirty[_undo_pad] = 1;
+    );
+  ) : _undo_pending == 5 ? (
+    _undo_pad >= 0 && _undo_pad2 >= 0 && _undo_pad != _undo_pad2 ? (
+      swap_pads(_undo_pad, _undo_pad2);
+      // Swap pad string metadata
+      strcpy(#_swap_nm, get_cname_slot(_undo_pad));
+      strcpy(get_cname_slot(_undo_pad), get_cname_slot(_undo_pad2));
+      strcpy(get_cname_slot(_undo_pad2), #_swap_nm);
+      strcpy(#_swap_nm, get_name_slot(_undo_pad));
+      strcpy(get_name_slot(_undo_pad), get_name_slot(_undo_pad2));
+      strcpy(get_name_slot(_undo_pad2), #_swap_nm);
+      strcpy(#_swap_nm, get_path_slot(_undo_pad));
+      strcpy(get_path_slot(_undo_pad), get_path_slot(_undo_pad2));
+      strcpy(get_path_slot(_undo_pad2), #_swap_nm);
+      _swli = 0; loop(MAX_LAYERS,
+        _sw_a = LPATH_STR_BASE + _undo_pad * MAX_LAYERS + _swli;
+        _sw_b = LPATH_STR_BASE + _undo_pad2 * MAX_LAYERS + _swli;
+        strcpy(#_swap_nm, _sw_a); strcpy(_sw_a, _sw_b); strcpy(_sw_b, #_swap_nm);
+        _swli += 1;
+      );
+    );
+  );
+  mark_dirty_pad(_undo_pad);
+  col_dirty = 1;
+  // Flush pad names to gmem so bridge CMD 48 can sync multi-out tracks.
+  // sync_note_names() can't be used here — it sets CMD 52 which gets
+  // immediately clobbered by CMD 48 below.
+  _ki = 0; loop(NUM_PADS,
+    _cn = get_cname_slot(_ki);
+    _cnl = strlen(_cn);
+    _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+      gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] =
+        _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+      _cj += 1;
+    );
+    _ki += 1;
+  );
+  gmem[KIT_GMEM_UNDO_ACK] = 0;
+  gmem[KIT_GMEM_CMD] = 48;  // tell bridge to close Undo_EndBlock
+  _undo_pending = 0; _undo_pad = -1; _undo_pad2 = -1; _undo_layer = -1;
+);
+);
+
+function swing_ui_modal_gate() (
+_raw_lmb_down = lmb_down;  // preserve for overlay backdrop-click-to-close
+_raw_LMB = LMB;            // preserve for overlay backdrop-click-to-close
+overlay_pad >= 0 ? (
+  _ov_pw = 420; _ov_ph = 560;
+  _ov_px = (gfx_w - _ov_pw) / 2;
+  _ov_py = 28 + ((gfx_h - 28 - _ov_ph) / 2);
+  _in_ov = mx >= _ov_px && mx <= _ov_px + _ov_pw && my >= _ov_py && my <= _ov_py + _ov_ph;
+  // Suppress ALL mouse state so underlying controls never fire while overlay is open.
+  // The overlay code (drawn last) restores what it needs from _ov_* saved copies.
+  _ov_lmb_down = lmb_down; _ov_rmb_down = rmb_down;
+  _ov_LMB = LMB; _ov_RMB = RMB;
+  _ov_wheel = frame_wheel; _ov_mx = mx; _ov_my = my;
+  lmb_down = 0; rmb_down = 0; frame_wheel = 0;
+  LMB = 0; RMB = 0;
+);
+);
+
+function swing_ui_export_tick() (
+kit_export_state == 1 ? (
+  // Phase 1: Signal Lua to prompt user for kit name + metadata
+  // LOCK reacquire is belt-and-suspenders: the save button handlers in
+  // rk_swing_ui_panels_controls.jsfx-inc:47 already write LOCK + CMD=10
+  // atomically and skip state 1, but if any external code path ever sets
+  // kit_export_state=1 without writing LOCK, this prevents the bridge's
+  // stale-LOCK self-heal from clearing LOCK before the save reaches Lua.
+  gmem[KIT_GMEM_LOCK] = instance_id;
+  gmem[KIT_GMEM_CMD] = 10;  // ask Lua for name
+  kit_export_state = 10;     // wait for name
+);
+
+kit_export_state == 10 ? (
+  // Phase 1b: Wait for Lua to provide name (CMD=11) or cancel (CMD=98)
+  gmem[KIT_GMEM_CMD] == 11 ? (
+    // Name ready — read it back from gmem
+    _knl = gmem[KIT_GMEM_NAMELEN] | 0;
+    _knl = min(_knl, 32);
+    str_setlen(#kit_name, 0);
+    _ki = 0; loop(_knl,
+      str_setchar(#kit_name, _ki, gmem[KIT_GMEM_NAME + _ki] | 0);
+      _ki += 1;
+    );
+    str_setlen(#kit_name, _knl); kit_name_gmem_dirty = 1;
+    kit_export_state = 11;  // proceed to metadata copy
+  );
+  gmem[KIT_GMEM_CMD] == 98 ? ( kit_export_state = 0; kit_busy = 0; gmem[KIT_GMEM_LOCK] = 0; gmem[KIT_GMEM_CMD] = 0; );
+);
+
+kit_export_state == 11 ? (
+  // Phase 2: Write metadata to gmem (instant, one frame)
+  gmem[KIT_GMEM_VER] = 24;
+  gmem[KIT_GMEM_NPADS] = NUM_PADS;
+  // Kit name
+  _knl = strlen(#kit_name);
+  gmem[KIT_GMEM_NAMELEN] = _knl;
+  _ki = 0; loop(min(_knl, 32),
+    gmem[KIT_GMEM_NAME + _ki] = str_getchar(#kit_name, _ki);
+    _ki += 1;
+  );
+  // Global settings (new in kit format v22)
+  _gb = KIT_GMEM_GLOBALS;
+  gmem[_gb + 0]  = repeat_div;
+  gmem[_gb + 1]  = vel_curve;
+  gmem[_gb + 2]  = swing_amt;
+  gmem[_gb + 3]  = gfx_hpf_freq;
+  gmem[_gb + 4]  = gfx_lpf_freq;
+  gmem[_gb + 5]  = gfx_sat_drv;
+  gmem[_gb + 6]  = dly_div;
+  gmem[_gb + 7]  = dly_fb;
+  gmem[_gb + 8]  = dly_mix;
+  gmem[_gb + 9]  = dly_hpf_hz;
+  gmem[_gb + 10] = dly_lpf_hz;
+  gmem[_gb + 11] = dly_ping;
+  gmem[_gb + 12] = rvb_size;
+  gmem[_gb + 13] = rvb_damp;
+  gmem[_gb + 14] = rvb_mix;
+  gmem[_gb + 15] = rvb_width;
+  gmem[_gb + 16] = gfx_eq_lo;
+  gmem[_gb + 17] = gfx_eq_mid;
+  gmem[_gb + 18] = gfx_eq_hi;
+  gmem[_gb + 19] = gfx_lim_on;
+  gmem[_gb + 20] = gfx_lim_thr;
+  gmem[_gb + 21] = gfx_lim_rel;
+  gmem[_gb + 22] = gfx_eq_lo_freq;
+  gmem[_gb + 23] = gfx_eq_mid_freq;
+  gmem[_gb + 24] = gfx_eq_hi_freq;
+  gmem[_gb + 25] = meq_lo_bell;
+  gmem[_gb + 26] = meq_hi_bell;
+  gmem[_gb + 27] = note_map;
+  gmem[_gb + 28] = multi_out;
+  gmem[_gb + 29] = color_palette;
+  gmem[_gb + 30] = meq_bypass;
+  gmem[_gb + 31] = cmp_thresh;
+  gmem[_gb + 32] = cmp_ratio;
+  gmem[_gb + 33] = cmp_attack;
+  gmem[_gb + 34] = cmp_release;
+  gmem[_gb + 35] = cmp_knee;
+  gmem[_gb + 36] = cmp_makeup;
+  gmem[_gb + 37] = cmp_mix;
+  gmem[_gb + 38] = cmp_bypass;
+  gmem[_gb + 39] = rvb_predelay;
+  gmem[_gb + 40] = rvb_hpf;
+  gmem[_gb + 41] = oneshot_global;
+  // Per-pad metadata
+  _ki = 0; loop(NUM_PADS,
+    _mb = KIT_GMEM_META + _ki * KIT_GMEM_META_PP;
+    _li_base = _ki * MAX_LAYERS;
+    gmem[_mb + 0]  = p_gain[_ki];
+    gmem[_mb + 1]  = p_pan[_ki];
+    gmem[_mb + 2]  = p_tune[_ki];
+    gmem[_mb + 3]  = p_attack[_ki];
+    gmem[_mb + 4]  = p_decay[_ki];
+    gmem[_mb + 5]  = p_sustain[_ki];
+    gmem[_mb + 6]  = p_release[_ki];
+    gmem[_mb + 7]  = p_mute[_ki];
+    gmem[_mb + 8]  = p_solo[_ki];
+    gmem[_mb + 9]  = p_output[_ki];
+    gmem[_mb + 10] = p_note[_ki];
+    gmem[_mb + 11] = p_note_lock[_ki];
+    gmem[_mb + 12] = col_auto_mode_id > 0 ? col_auto_hue[_ki] : p_color[_ki];
+    gmem[_mb + 13] = p_choke[_ki];
+    gmem[_mb + 14] = p_oneshot[_ki];
+    gmem[_mb + 15] = p_reverse[_ki];
+    gmem[_mb + 16] = fx_hpf_freq[_ki];
+    gmem[_mb + 17] = fx_lpf_freq[_ki];
+    gmem[_mb + 18] = fx_eq_lo[_ki];
+    gmem[_mb + 19] = fx_eq_mid[_ki];
+    gmem[_mb + 20] = fx_eq_hi[_ki];
+    gmem[_mb + 21] = fx_sat_drv[_ki];
+    gmem[_mb + 22] = fx_drv_mode[_ki];
+    gmem[_mb + 23] = fx_bc_rate[_ki];
+    gmem[_mb + 24] = fx_bc_bits[_ki];
+    gmem[_mb + 25] = fx_snd_dly[_ki];
+    gmem[_mb + 26] = fx_snd_rvb[_ki];
+    gmem[_mb + 27] = fx_eq_lo_freq[_ki];
+    gmem[_mb + 28] = fx_eq_mid_freq[_ki];
+    gmem[_mb + 29] = fx_eq_hi_freq[_ki];
+    gmem[_mb + 30] = p_sum_tight[_ki];
+    gmem[_mb + 31] = p_rpt_div[_ki];
+    gmem[_mb + 32] = p_layer_cnt[_ki];
+    gmem[_mb + 33] = p_layer_mode[_ki];
+    gmem[_mb + 34] = s_len[_ki];
+    gmem[_mb + 35] = s_start[_ki];
+    gmem[_mb + 36] = s_end[_ki];
+    gmem[_mb + 37] = s_sr[_ki];
+    gmem[_mb + 38] = s_norm[_ki];
+    gmem[_mb + 39] = s_norm_gain[_ki];
+    // Per-layer data (4 layers × 10 values = 40 floats)
+    _lj = 0; loop(MAX_LAYERS,
+      _lo = _mb + 40 + _lj * 10;
+      _lidx = _li_base + _lj;
+      gmem[_lo + 0] = l_len[_lidx];
+      gmem[_lo + 1] = l_start[_lidx];
+      gmem[_lo + 2] = l_end[_lidx];
+      gmem[_lo + 3] = l_sr[_lidx];
+      gmem[_lo + 4] = l_norm[_lidx];
+      gmem[_lo + 5] = l_norm_gain[_lidx];
+      gmem[_lo + 6] = l_vel_lo[_lidx];
+      gmem[_lo + 7] = l_vel_hi[_lidx];
+      gmem[_lo + 8] = l_rr_order[_lidx];
+      gmem[_lo + 9] = l_gain[_lidx];
+      _lj += 1;
+    );
+    // Sample offset (separate gmem region — META is full)
+    gmem[GS_PAD_OFFSET_BASE + _ki] = p_sample_offset[_ki];
+    // Pad name (up to 16 chars)
+    _cn = get_cname_slot(_ki);
+    _cnl = strlen(_cn);
+    _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+      gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] =
+        _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+      _cj += 1;
+    );
+    _ki += 1;
+  );
+  // ─── V2/v3 format: write per-pad file paths to gmem audio area ──
+  _ki = 0; loop(NUM_PADS,
+    _tpath = get_path_slot(_ki);
+    _plen = strlen(_tpath);
+    _pbase = KIT_GMEM_AUDIO + _ki * 260;
+    gmem[_pbase] = _plen;
+    _ci = 0; loop(min(_plen, 258),
+      gmem[_pbase + 1 + _ci] = str_getchar(_tpath, _ci);
+      _ci += 1;
+    );
+    gmem[_pbase + 1 + min(_plen, 258)] = 0;
+    _ki += 1;
+  );
+  // ─── V4 addition: write per-layer paths to gmem after pad paths ──
+  // Layout: KIT_GMEM_AUDIO + NUM_PADS*260 + (pad*MAX_LAYERS + layer) * 260
+  // (NUM_PADS*MAX_LAYERS = 64 slots × 260 doubles = ~166KB, well within audio region)
+  // The Lua bridge reads these to locate per-layer source files for v4 save.
+  _ki = 0; loop(NUM_PADS,
+    _lj = 0; loop(MAX_LAYERS,
+      _lp = LPATH_STR_BASE + _ki * MAX_LAYERS + _lj;
+      _lpl = strlen(_lp);
+      _lpb = KIT_GMEM_AUDIO + NUM_PADS * 260 + (_ki * MAX_LAYERS + _lj) * 260;
+      gmem[_lpb] = _lpl;
+      _ci = 0; loop(min(_lpl, 258),
+        gmem[_lpb + 1 + _ci] = str_getchar(_lp, _ci);
+        _ci += 1;
+      );
+      gmem[_lpb + 1 + min(_lpl, 258)] = 0;
+      _lj += 1;
+    );
+    _ki += 1;
+  );
+
+  // ─── Per-pad audio dump (SELF-CONTAINED-KIT FIX) ─────────────────────
+  // Write THIS instance's internal s_audio_start[] to gmem in a region the
+  // bridge can read for kits whose pads have no disk source (Choppa slices,
+  // gmem-imported audio, etc.). Without this dump, the bridge falls back to
+  // reading from KIT_GMEM_AUDIO + offset which state-11 just overwrote with
+  // path strings — corrupted reads produce wrong-pad / blank kit saves.
+  //
+  // Dump layout: KIT_GMEM_AUDIO_DUMP + cumulative interleaved-sample offset.
+  // Bridge reads from this region using prefix sum of s_len (non-layered) or
+  // sum of l_len per layer (layered). Both halves agree on the layout.
+  KIT_GMEM_AUDIO_DUMP = KIT_GMEM_AUDIO + NUM_PADS * 260 + NUM_PADS * MAX_LAYERS * 260;
+  _dump_off = 0;
+  _ki = 0; loop(NUM_PADS,
+    p_layer_cnt[_ki] > 0 ? (
+      // Layered: dump each active layer in order
+      _lj = 0; loop(p_layer_cnt[_ki],
+        _lidx = _ki * MAX_LAYERS + _lj;
+        _l_alen = l_len[_lidx];
+        _l_alen > 0 ? (
+          _l_src = s_audio_start + _ki * SLOT_SIZE + _lj * LAYER_SIZE;
+          _j = 0; loop(_l_alen,
+            gmem[KIT_GMEM_AUDIO_DUMP + _dump_off + _j] = _l_src[_j];
+            _j += 1;
+          );
+          _dump_off += _l_alen;
+        );
+        _lj += 1;
+      );
+    ) : (
+      // Non-layered: dump pad-main audio (covers Choppa, drag-drop, etc.)
+      _s_alen = s_len[_ki];
+      _s_alen > 0 ? (
+        _s_src = s_audio_start + _ki * SLOT_SIZE;
+        _j = 0; loop(_s_alen,
+          gmem[KIT_GMEM_AUDIO_DUMP + _dump_off + _j] = _s_src[_j];
+          _j += 1;
+        );
+        _dump_off += _s_alen;
+      );
+    );
+    _ki += 1;
+  );
+
+  gmem[KIT_GMEM_VER] = 200;   // v2/v3/v4 marker (Lua decides format from gmem state)
+  gmem[KIT_GMEM_CMD] = 1;     // data ready — bridge writes file
+  kit_export_state = 3;        // wait for bridge acknowledgment
+  kit_busy = 1;
+);
+
+kit_export_state == 3 ? (
+  // Phase 3: Wait for Lua script to save and acknowledge
+  gmem[KIT_GMEM_CMD] == 99 ? ( kit_export_state = 0; kit_busy = 0; gmem[KIT_GMEM_LOCK] = 0; gmem[KIT_GMEM_CMD] = 0; );
+  gmem[KIT_GMEM_CMD] == 98 ? ( kit_export_state = 0; kit_busy = 0; gmem[KIT_GMEM_LOCK] = 0; gmem[KIT_GMEM_CMD] = 0; );
+);
+);
+
+function swing_ui_import_tick() (
+kit_import_state == 1 ? (
+  // Phase 1: Waiting for Lua to load file and write to gmem
+  gmem[KIT_GMEM_CMD] == 3 ? (
+    kit_import_state = 2;  // data ready, read metadata
+  );
+  // CMD=99 means Lua finished a non-import op (multi-out, auto-color)
+  gmem[KIT_GMEM_CMD] == 99 ? ( kit_import_state = 0; kit_busy = 0; gmem[KIT_GMEM_LOCK] = 0; gmem[KIT_GMEM_CMD] = 0; );
+  gmem[KIT_GMEM_CMD] == 98 ? ( kit_import_state = 0; kit_busy = 0; gmem[KIT_GMEM_LOCK] = 0; gmem[KIT_GMEM_CMD] = 0; );
+);
+
+kit_import_state == 2 ? (
+  // Phase 2: Read metadata from gmem (instant)
+  // Kit name
+  _knl = gmem[KIT_GMEM_NAMELEN] | 0;
+  _knl = min(_knl, 32);
+  str_setlen(#kit_name, 0);
+  _ki = 0; loop(_knl,
+    str_setchar(#kit_name, _ki, gmem[KIT_GMEM_NAME + _ki] | 0);
+    _ki += 1;
+  );
+  str_setlen(#kit_name, _knl); kit_name_gmem_dirty = 1;
+  // Global settings (kit format v22+; skip for older kits)
+  gmem[KIT_GMEM_VER] >= 22 ? (
+    _gb = KIT_GMEM_GLOBALS;
+    repeat_div     = gmem[_gb + 0];
+    vel_curve      = gmem[_gb + 1];
+    swing_amt      = gmem[_gb + 2];
+    gfx_hpf_freq   = gmem[_gb + 3];
+    gfx_lpf_freq   = gmem[_gb + 4];
+    gfx_sat_drv    = gmem[_gb + 5];
+    dly_div        = gmem[_gb + 6];
+    dly_fb         = gmem[_gb + 7];
+    dly_mix        = gmem[_gb + 8];
+    dly_hpf_hz     = gmem[_gb + 9];
+    dly_lpf_hz     = gmem[_gb + 10];
+    dly_ping       = gmem[_gb + 11];
+    rvb_size       = gmem[_gb + 12];
+    rvb_damp       = gmem[_gb + 13];
+    rvb_mix        = gmem[_gb + 14];
+    rvb_width      = gmem[_gb + 15];
+    gfx_eq_lo      = gmem[_gb + 16];
+    gfx_eq_mid     = gmem[_gb + 17];
+    gfx_eq_hi      = gmem[_gb + 18];
+    gfx_lim_on     = gmem[_gb + 19];
+    gfx_lim_thr    = gmem[_gb + 20];
+    gfx_lim_rel    = gmem[_gb + 21];
+    gfx_eq_lo_freq  = gmem[_gb + 22];
+    gfx_eq_mid_freq = gmem[_gb + 23];
+    gfx_eq_hi_freq  = gmem[_gb + 24];
+    meq_lo_bell    = gmem[_gb + 25];
+    meq_hi_bell    = gmem[_gb + 26];
+    note_map       = gmem[_gb + 27];
+    multi_out      = gmem[_gb + 28];
+    color_palette  = gmem[_gb + 29];
+    meq_bypass     = gmem[_gb + 30];
+    cmp_thresh     = gmem[_gb + 31];
+    cmp_ratio      = gmem[_gb + 32];
+    cmp_attack     = gmem[_gb + 33];
+    cmp_release    = gmem[_gb + 34];
+    cmp_knee       = gmem[_gb + 35];
+    cmp_makeup     = gmem[_gb + 36];
+    cmp_mix        = gmem[_gb + 37];
+    cmp_bypass     = gmem[_gb + 38];
+    rvb_predelay   = gmem[_gb + 39];
+    rvb_hpf        = gmem[_gb + 40];
+    oneshot_global = gmem[_gb + 41];
+    // Recalc derived values
+    recalc_global_fx();
+    gfx_lim_rel_c = exp(-1.0 / max(1, gfx_lim_rel * 0.001 * srate));
+    dly_recalc(); rvb_recalc(); cmp_recalc();
+  );
+  // Per-pad metadata
+  _ki = 0; loop(NUM_PADS,
+    _mb = KIT_GMEM_META + _ki * KIT_GMEM_META_PP;
+    _li_base = _ki * MAX_LAYERS;
+    p_gain[_ki]      = gmem[_mb + 0];
+    p_pan[_ki]       = gmem[_mb + 1];
+    p_tune[_ki]      = gmem[_mb + 2];
+    p_attack[_ki]    = gmem[_mb + 3];
+    p_decay[_ki]     = gmem[_mb + 4];
+    p_sustain[_ki]   = gmem[_mb + 5];
+    p_release[_ki]   = gmem[_mb + 6];
+    // Kit-import: treat saved ADSR as user-tuned so a later drag-in won't auto-overwrite it.
+    // (The kit author's stored values are what the user chose to ship in the kit.)
+    p_adsr_user[_ki] = 1;
+    p_mute[_ki]      = gmem[_mb + 7];
+    p_solo[_ki]      = gmem[_mb + 8];
+    p_output[_ki]    = gmem[_mb + 9];
+    p_note[_ki]      = gmem[_mb + 10];
+    p_note_lock[_ki] = gmem[_mb + 11];
+    p_color[_ki]     = gmem[_mb + 12]; col_dirty = 1;
+    p_choke[_ki]     = gmem[_mb + 13];
+    p_oneshot[_ki]   = gmem[_mb + 14];
+    p_reverse[_ki]   = gmem[_mb + 15];
+    fx_hpf_freq[_ki] = gmem[_mb + 16];
+    fx_lpf_freq[_ki] = gmem[_mb + 17];
+    fx_eq_lo[_ki]    = gmem[_mb + 18];
+    fx_eq_mid[_ki]   = gmem[_mb + 19];
+    fx_eq_hi[_ki]    = gmem[_mb + 20];
+    fx_sat_drv[_ki]  = gmem[_mb + 21];
+    fx_drv_mode[_ki] = gmem[_mb + 22];
+    fx_bc_rate[_ki]  = gmem[_mb + 23];
+    fx_bc_bits[_ki]  = gmem[_mb + 24];
+    fx_snd_dly[_ki]  = gmem[_mb + 25];
+    fx_snd_rvb[_ki]  = gmem[_mb + 26];
+    fx_eq_lo_freq[_ki]  = gmem[_mb + 27];
+    fx_eq_mid_freq[_ki] = gmem[_mb + 28];
+    fx_eq_hi_freq[_ki]  = gmem[_mb + 29];
+    p_sum_tight[_ki] = gmem[_mb + 30];
+    p_rpt_div[_ki]   = gmem[_mb + 31];
+    p_layer_cnt[_ki] = max(0, min(MAX_LAYERS, gmem[_mb + 32]|0));
+    p_layer_mode[_ki] = max(0, min(3, gmem[_mb + 33]|0));
+    s_len[_ki]       = gmem[_mb + 34];
+    s_start[_ki]     = gmem[_mb + 35];
+    s_end[_ki]       = gmem[_mb + 36];
+    s_sr[_ki]        = gmem[_mb + 37];
+    s_norm[_ki]      = gmem[_mb + 38];
+    s_norm_gain[_ki] = max(0.01, min(100.0, gmem[_mb + 39]));
+    // Per-layer data (stride 10 for v24+, stride 9 for older kits)
+    _layer_stride = gmem[KIT_GMEM_VER] >= 24 ? 10 : 9;
+    _lj = 0; loop(MAX_LAYERS,
+      _lo = _mb + 40 + _lj * _layer_stride;
+      _lidx = _li_base + _lj;
+      l_len[_lidx]       = gmem[_lo + 0];
+      l_start[_lidx]     = gmem[_lo + 1];
+      l_end[_lidx]       = gmem[_lo + 2];
+      l_sr[_lidx]        = gmem[_lo + 3];
+      l_norm[_lidx]      = gmem[_lo + 4];
+      l_norm_gain[_lidx] = max(0.01, min(100.0, gmem[_lo + 5]));
+      l_vel_lo[_lidx]    = gmem[_lo + 6];
+      l_vel_hi[_lidx]    = gmem[_lo + 7];
+      l_rr_order[_lidx]  = gmem[_lo + 8];
+      _layer_stride >= 10 ? (
+        l_gain[_lidx] = max(0, min(2.0, gmem[_lo + 9]));
+      );
+      _lj += 1;
+    );
+    // Pad name
+    _cn = get_cname_slot(_ki);
+    str_setlen(_cn, 0);
+    _cj = 0; _cnl = 0;
+    loop(KIT_GMEM_PADNAME_LEN,
+      _cc = gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+      _cc > 0 ? ( str_setchar(_cn, _cj, _cc); _cnl = _cj + 1; );
+      _cj += 1;
+    );
+    str_setlen(_cn, _cnl);
+    // Sample offset (from dedicated gmem region)
+    p_sample_offset[_ki] = gmem[GS_PAD_OFFSET_BASE + _ki];
+    _ki += 1;
+  );
+  // Kit v23: force one-shot + zero per-pad repeat on old kits
+  gmem[KIT_GMEM_VER] < 23 ? (
+    _ki = 0; loop(NUM_PADS, p_oneshot[_ki] = -1; p_rpt_div[_ki] = 0; _ki += 1;);
+    oneshot_global = 1;
+  );
+  // Kit v25+: migrate binary one-shot (1) to tri-state (-1 = follow global)
+  gmem[KIT_GMEM_VER] >= 23 && gmem[KIT_GMEM_VER] < 25 ? (
+    _ki = 0; loop(NUM_PADS,
+      p_oneshot[_ki] == 1 ? p_oneshot[_ki] = -1;
+      _ki += 1;
+    );
+    oneshot_global = 1;
+  );
+  // Kit v24: default per-layer gain to unity for old kits
+  gmem[KIT_GMEM_VER] < 24 ? (
+    _ki = 0; loop(NUM_PADS * MAX_LAYERS, l_gain[_ki] = 1.0; _ki += 1;);
+  );
+  // Anti-pop: kill all voices + activate crossfade before touching audio buffers.
+  // Gate on _xf_prev being non-silent — kit-load while idle (no audio playing)
+  // would otherwise attenuate the first hit's transient (~20ms ramp from silence
+  // to new audio). Threshold -80dB rejects denormal/biquad ringtail residue.
+  _xf_vi = 0; loop(MAX_VOICES + 1,
+    v_pos[_xf_vi] = -1; v_env[_xf_vi] = 0; v_stage[_xf_vi] = 0;
+    _xf_vi += 1;
+  );
+  abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+    _xf_pos = 0;
+    _xf_len = max(1, (0.020 * srate)|0);  // 20ms crossfade
+    _xf_active = 1;
+  );
+  // Zero all audio buffers before import (prevents stale tail data from old kits)
+  _ki = 0; loop(NUM_PADS,
+    memset(s_audio_start + _ki * SLOT_SIZE, 0, SLOT_SIZE);
+    _ki += 1;
+  );
+  // Calculate total audio for import progress
+  kit_total_audio = 0;
+  _ki = 0; loop(NUM_PADS,
+    kit_total_audio += gmem[KIT_GMEM_AUDIOLEN + _ki];
+    _ki += 1;
+  );
+  // Start audio copy
+  kit_import_state = 3;
+  kit_copy_pad = 0;
+  kit_copy_layer = 0;
+  kit_copy_pos = 0;
+  kit_audio_off = 0;
+  kit_copied_audio = 0;
+);
+
+kit_import_state == 3 ? (
+  // ─── V2 path-based import (incremental: 2 pads per frame) ─────────
+  gmem[KIT_GMEM_VER] == 200 ? (
+    // First frame: kill voices + clear all audio buffers
+    kit_copy_pad == 0 ? (
+      _xf_vi = 0; loop(MAX_VOICES + 1,
+        v_pos[_xf_vi] = -1; v_env[_xf_vi] = 0; v_stage[_xf_vi] = 0;
+        _xf_vi += 1;
+      );
+      // Gate threshold -40 dB (see kit_import_state == 2 above for rationale).
+      abs(_xf_prev[0]) + abs(_xf_prev[1]) > 0.01 ? (
+        _xf_pos = 0;
+        _xf_len = max(1, (0.020 * srate)|0);
+        _xf_active = 1;
+      );
+      _ki = 0; loop(NUM_PADS,
+        memset(s_audio_start + _ki * SLOT_SIZE, 0, SLOT_SIZE);
+        _ki += 1;
+      );
+    );
+    // Load up to 2 pads per frame
+    _v2_count = 0;
+    while(_v2_count < 2 && kit_copy_pad < NUM_PADS) (
+      _ki = kit_copy_pad;
+      _pbase = KIT_GMEM_AUDIO + _ki * 260;
+      _plen = gmem[_pbase] | 0;
+      _plen > 0 && _plen < 259 ? (
+        strcpy(#_kit_tmp_path, "");
+        _ci = 0; loop(_plen,
+          str_setchar(#_kit_tmp_path, _ci, gmem[_pbase + 1 + _ci] | 0);
+          _ci += 1;
+        );
+        str_setlen(#_kit_tmp_path, _plen);
+        load_from_path(_ki, #_kit_tmp_path);
+      ) : (
+        clear_pad(_ki);
+      );
+      // Re-apply pad name from gmem (load_from_path auto-named it)
+      _cn = get_cname_slot(_ki);
+      str_setlen(_cn, 0);
+      _cj = 0; _cnl = 0;
+      loop(KIT_GMEM_PADNAME_LEN,
+        _cc = gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+        _cc > 0 ? ( str_setchar(_cn, _cj, _cc); _cnl = _cj + 1; );
+        _cj += 1;
+      );
+      str_setlen(_cn, _cnl);
+      // Re-apply s_start/s_end and ADSR from metadata
+      // load_from_path called analyze_adsr (which set p_adsr_user=0); the kit's
+      // stored ADSR overrides that, so re-mark the pad as user-tuned to prevent
+      // a later drag-in from silently re-running analyze and losing kit values.
+      _mb = KIT_GMEM_META + _ki * KIT_GMEM_META_PP;
+      s_start[_ki]     = gmem[_mb + 35];
+      s_end[_ki]       = gmem[_mb + 36];
+      p_attack[_ki]    = gmem[_mb + 3];
+      p_decay[_ki]     = gmem[_mb + 4];
+      p_sustain[_ki]   = gmem[_mb + 5];
+      p_release[_ki]   = gmem[_mb + 6];
+      p_adsr_user[_ki] = 1;
+      recalc_pad(_ki);
+      s_dirty[_ki] = 1;
+      kit_copy_pad += 1;
+      _v2_count += 1;
+    );
+    kit_copy_pad >= NUM_PADS ? (
+      kit_import_state = 4;
+    );
+  ) : (
+    // ─── V1 binary audio copy (existing code) ─────────────────────────
+    _copied = 0;
+    while(_copied < KIT_COPY_CHUNK && kit_copy_pad < NUM_PADS) (
+      p_layer_cnt[kit_copy_pad] > 0 ? (
+        _lidx = kit_copy_pad * MAX_LAYERS + kit_copy_layer;
+        _dst = s_audio_start + kit_copy_pad * SLOT_SIZE + kit_copy_layer * LAYER_SIZE;
+        _alen = l_len[_lidx];
+      ) : (
+        _dst = s_audio_start + kit_copy_pad * SLOT_SIZE;
+        _alen = s_len[kit_copy_pad];
+      );
+      _remaining = _alen - kit_copy_pos;
+      _remaining <= 0 ? (
+        p_layer_cnt[kit_copy_pad] > 0 ? (
+          kit_copy_layer += 1;
+          kit_copy_pos = 0;
+          kit_copy_layer >= MAX_LAYERS ? (
+            kit_copy_pad += 1;
+            kit_copy_layer = 0;
+          );
+        ) : (
+          kit_copy_pad += 1;
+          kit_copy_pos = 0;
+        );
+      ) : (
+        _batch = min(KIT_COPY_CHUNK - _copied, _remaining);
+        _src_off = KIT_GMEM_AUDIO + kit_audio_off;
+        _doff = kit_copy_pos;
+        _bj = 0; loop(_batch,
+          _dst[_doff + _bj] = gmem[_src_off + _bj];
+          _bj += 1;
+        );
+        kit_copy_pos += _batch;
+        kit_audio_off += _batch;
+        _copied += _batch;
+        kit_copied_audio += _batch;
+        kit_copy_pos >= _alen ? (
+          p_layer_cnt[kit_copy_pad] > 0 ? (
+            kit_copy_layer += 1;
+            kit_copy_pos = 0;
+            kit_copy_layer >= MAX_LAYERS ? (
+              kit_copy_pad += 1;
+              kit_copy_layer = 0;
+            );
+          ) : (
+            kit_copy_pad += 1;
+            kit_copy_pos = 0;
+          );
+        );
+      );
+    );
+    kit_copy_pad >= NUM_PADS ? (
+      kit_import_state = 4;
+    );
+  );
+);
+
+kit_import_state == 4 ? (
+  // Phase 4: Recalc all pads
+  _ki = 0; loop(NUM_PADS,
+    s_dirty[_ki] = 1;
+    recalc_pad(_ki);
+    recalc_fx(_ki);
+    _ki += 1;
+  );
+  gmem[KIT_GMEM_CMD] = 0;
+  kit_import_state = 0;
+  kit_busy = 0;
+  gmem[KIT_GMEM_LOCK] = 0;
+  mark_dirty_pad(_undo_pad);
+  sync_note_names();
+);
+);
+
+function swing_ui_misc_cmds() (
+!kit_busy && gmem[KIT_GMEM_CMD] == 99 ? (
+  // Re-read pad names from gmem
+  _ki = 0; loop(NUM_PADS,
+    _cn = get_cname_slot(_ki);
+    str_setlen(_cn, 0);
+    _cj = 0; _cnl = 0;
+    loop(KIT_GMEM_PADNAME_LEN,
+      _cc = gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+      _cc > 0 ? ( str_setchar(_cn, _cj, _cc); _cnl = _cj + 1; );
+      _cj += 1;
+    );
+    str_setlen(_cn, _cnl);
+    // Re-read color from metadata slot 12
+    p_color[_ki] = gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 12]; col_dirty = 1;
+    _ki += 1;
+  );
+  gmem[KIT_GMEM_CMD] = 0;
+  mark_dirty_pad(_undo_pad);
+);
+
+// Pad rename response: Lua bridge finished GetUserInputs (CMD 51).
+//
+// Multi-instance gate: only act if THIS instance owns the LOCK that
+// was acquired when the rename was issued (rk_swing_ui_grid_pads.jsfx-
+// inc:686-688 takes LOCK = instance_id before writing CMD 50). Without
+// this gate, a second Swing instance would also see CMD=51 and apply
+// the rename to ITS pad with the same index — silently overwriting
+// the other instance's pad name. Also: the unconditional LOCK clear
+// at the tail would release another instance's lock (the originator's
+// rename is in flight and still owns the lock).
+gmem[KIT_GMEM_CMD] == 51 && gmem[KIT_GMEM_LOCK] == instance_id ? (
+  _rp = gmem[KIT_GMEM_PARAM1] | 0;   // pad index from CMD 50 dialog
+  // Release the rename's LOCK + CMD FIRST so sync_note_names() (called
+  // below) can pass its gate (CMD==0 && (LOCK==0 || LOCK==instance_id)).
+  // The previous order — sync_note_names() inside the validity check,
+  // CMD/LOCK clears after — meant the gate failed every time and the
+  // piano-roll never got the new pad name. State 4 (kit load) has the
+  // correct order; this handler just had it wrong.
+  gmem[KIT_GMEM_LOCK] = 0;
+  gmem[KIT_GMEM_CMD] = 0;
+  _rp >= 0 && _rp < NUM_PADS ? (
+    _cn = get_cname_slot(_rp);
+    str_setlen(_cn, 0);
+    _cj = 0; _cnl = 0;
+    loop(KIT_GMEM_PADNAME_LEN,
+      _cc = gmem[KIT_GMEM_PADNAMES + _rp * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+      _cc > 0 ? ( str_setchar(_cn, _cj, _cc); _cnl = _cj + 1; );
+      _cj += 1;
+    );
+    str_setlen(_cn, _cnl);
+    mark_dirty_pad(_rp);
+    sync_note_names();
+    col_dirty = 1; // re-derive auto-color from new cname
+  );
+);
+
+// Peak meter decay — use pad_meterL/R (smoothed in @sample)
+gi = 0; loop(NUM_PADS,
+  _pk = max(pad_meterL[gi], pad_meterR[gi]);
+  p_peak_hold[gi] = max(_pk, p_peak_hold[gi] * 0.92);
+  gi += 1;
+);
+
+// Build dirty caches
+gi = 0; loop(NUM_PADS, s_dirty[gi] ? build_wv_cache(gi); gi += 1;);
+);
+
+function swing_ui_set_colors() (
+bg_r=0.84; bg_g=0.81; bg_b=0.76;   // warm cream body (matches iMPC housing)
+hd_r=0.30; hd_g=0.30; hd_b=0.32;   // dark charcoal header strip
+ac_r=0.85; ac_g=0.20; ac_b=0.12;   // AKAI red accent
+pad_bg_r=0.58; pad_bg_g=0.57; pad_bg_b=0.55;  // iMPC grey rubber pad (lighter, more neutral)
+pad_well_r=0.76; pad_well_g=0.74; pad_well_b=0.70; // cream pad well (recessed tray)
+// Button colors
+btn_blue_r=0.28; btn_blue_g=0.48; btn_blue_b=0.72;  // iMPC blue side buttons
+btn_red_r=0.80; btn_red_g=0.18; btn_red_b=0.18;     // iMPC red (record)
+btn_grey_r=0.68; btn_grey_g=0.66; btn_grey_b=0.62;   // iMPC transport grey buttons
+// LCD panel colors
+lcd_bg_r=0.10; lcd_bg_g=0.26; lcd_bg_b=0.35;   // deep teal LCD background
+lcd_tx_r=0.70; lcd_tx_g=0.90; lcd_tx_b=0.92;   // bright LCD text
+);
+
+function swing_ui_draw_header() (
+  gfx_set(bg_r, bg_g, bg_b, 1); gfx_rect(0, 0, gfx_w, gfx_h);
+
+  // Subtle brushed plastic texture effect (faint horizontal lines)
+  gfx_set(0.15, 0.14, 0.13, 0.02);
+  _tex_y = 31;
+  loop(((gfx_h - 31) / 3)|0,
+    gfx_rect(0, _tex_y, gfx_w, 1);
+    _tex_y += 3;
+  );
+
+  // ── Header (28px) — dark charcoal strip with Swing branding ─────────────
+  // Gradient effect: darker at top, lighter at bottom
+  gfx_set(hd_r * 0.85, hd_g * 0.85, hd_b * 0.85, 1); gfx_rect(0, 0, gfx_w, 1);    // darker top
+  gfx_set(hd_r, hd_g, hd_b, 1); gfx_rect(0, 1, gfx_w, 26);                        // main body
+  gfx_set(hd_r * 1.1, hd_g * 1.1, hd_b * 1.1, 0.6); gfx_rect(0, 26, gfx_w, 1);    // lighter bottom
+  // Bottom edge groove
+  gfx_set(0.18, 0.18, 0.20, 1); gfx_rect(0, 27, gfx_w, 1);
+  gfx_set(0.42, 0.42, 0.44, 0.4); gfx_rect(0, 28, gfx_w, 1); // subtle shadow line at body
+  // "SWING" title with spaced letters
+  gfx_setfont(1, "Arial", 16, 'b');
+  gfx_set(ac_r, ac_g, ac_b, 1);
+  gfx_x = 10; gfx_y = 5; gfx_drawstr("S W I N G");
+  // Subtitle: smaller, more subdued
+  gfx_setfont(1, "Arial", 9, 0);
+  gfx_set(0.55, 0.53, 0.50, 0.5);
+  gfx_x = 78; gfx_y = 17; gfx_drawstr("by EON Studios");
+
+  // ── Right-side button cluster (EMBED + UNDO + REDO) ──────────────────
+  // Anchored to the right edge with ~90 px reserved for the BRIDGE
+  // indicator + label (and the optional UPDATE button when an update
+  // is available). Cluster reads left-to-right: EMBED → UNDO → REDO.
+  // UNDO/REDO are color-coded (amber / green) so the user can tell
+  // them apart at a glance even with the arrow glyphs.
+  _btn_h   = 16;
+  _btn_y   = 6;
+  _btn_pad = 5;
+  _btn_gap = 4;
+  gfx_setfont(1, "Arial", 11, 'b');
+  gfx_measurestr("↷ REDO", _redo_tw, _btn_th);
+  _redo_bw = _redo_tw + _btn_pad * 2;
+  gfx_measurestr("↶ UNDO", _undo_tw, _btn_th);
+  _undo_bw = _undo_tw + _btn_pad * 2;
+  gfx_measurestr("EMBED", _emb_tw, _emb_th);
+  _emb_bw  = _emb_tw + _btn_pad * 2;
+  gfx_measurestr("→ THRU", _thru_tw, _btn_th);
+  _thru_bw = _thru_tw + _btn_pad * 2;
+  // Anchor: REDO ends 90 px from the right edge — leaves room for the
+  // BRIDGE indicator + label, with a small visual gap from the cluster.
+  // Cluster reads left-to-right: THRU → EMBED → UNDO → REDO.
+  _redo_bx = gfx_w - 90 - _redo_bw;
+  _undo_bx = _redo_bx - _undo_bw - _btn_gap;
+  _emb_bx  = _undo_bx - _emb_bw  - _btn_gap;
+  _thru_bx = _emb_bx  - _thru_bw - _btn_gap;
+  _emb_by  = _btn_y;
+  _emb_bh  = _btn_h;
+
+  // ── MIDI THRU toggle (purple — distinct from amber/green/blue) ──
+  // When ON, Swing forwards every MIDI note to the next FX in the chain
+  // even after triggering its own pad. Lets you stack two Swings on the
+  // same track for layered drum sounds. slider_automate triggers REAPER's
+  // chunk-diff undo capture so toggling is undoable.
+  _thru_hover = mx >= _thru_bx && mx <= _thru_bx + _thru_bw &&
+                my >= _btn_y && my <= _btn_y + _btn_h;
+  midi_thru ? (
+    gfx_set(0.55, 0.30, 0.85, _thru_hover ? 1.0 : 0.85);   // active purple
+  ) : (
+    gfx_set(0.35, 0.35, 0.38, _thru_hover ? 0.85 : 0.65);  // neutral gray
+  );
+  gfx_rect(_thru_bx, _btn_y, _thru_bw, _btn_h);
+  gfx_set(1, 1, 1, _thru_hover ? 1.0 : 0.95);
+  gfx_x = _thru_bx + _btn_pad; gfx_y = _btn_y + (_btn_h - _btn_th) * 0.5;
+  gfx_drawstr("→ THRU");
+  lmb_down && _thru_hover ? (
+    midi_thru = !midi_thru;
+    slider_automate(slider22);
+    mark_dirty();
+  );
+  _thru_hover ? (
+    #tooltip = midi_thru
+      ? "MIDI Pass-Through: ON — notes forward to next FX (layering)"
+      : "MIDI Pass-Through: OFF — Swing eats its mapped notes (default)";
+  );
+
+  // ── EMBED button ──
+  _emb_hover = mx >= _emb_bx && mx <= _emb_bx + _emb_bw &&
+               my >= _emb_by && my <= _emb_by + _emb_bh;
+  embed_show_knobs ? (
+    gfx_set(0.35, 0.65, 0.85, _emb_hover ? 0.95 : 0.75);  // active blue
+  ) : (
+    gfx_set(0.35, 0.35, 0.38, _emb_hover ? 0.85 : 0.65);  // neutral gray
+  );
+  gfx_rect(_emb_bx, _emb_by, _emb_bw, _emb_bh);
+  gfx_set(1, 1, 1, _emb_hover ? 1.0 : 0.95);
+  gfx_x = _emb_bx + _btn_pad; gfx_y = _emb_by + (_emb_bh - _emb_th) * 0.5;
+  gfx_drawstr("EMBED");
+  lmb_down && _emb_hover ? (
+    _menu_str = embed_show_knobs ? "!Show Volume Knobs" : "Show Volume Knobs";
+    _emb_resp = gfx_showmenu(_menu_str);
+    _emb_resp == 1 ? ( embed_show_knobs = !embed_show_knobs; mark_dirty_pad(_undo_pad); );
+  );
+
+  // ── UNDO button (amber) ──
+  // Click signals bridge via CMD 80; bridge calls REAPER's Undo and
+  // writes back the next-action description to GS_UNDO_DESC for the
+  // tooltip. Dimmed when no undo available.
+  _ur_avail_u = gmem[GS_UNDO_AVAIL] > 0;
+  _ur_hov_u = mx >= _undo_bx && mx <= _undo_bx + _undo_bw && my >= _btn_y && my <= _btn_y + _btn_h;
+  _ur_avail_u ? (
+    // Amber pill — distinguishes UNDO from REDO at a glance
+    gfx_set(0.85, 0.55, 0.20, _ur_hov_u ? 1.0 : 0.80);
+  ) : (
+    gfx_set(0.20, 0.20, 0.22, 0.45);
+  );
+  gfx_rect(_undo_bx, _btn_y, _undo_bw, _btn_h);
+  gfx_set(1, 1, 1, _ur_avail_u ? (_ur_hov_u ? 1.0 : 0.98) : 0.55);
+  gfx_x = _undo_bx + _btn_pad; gfx_y = _btn_y + (_btn_h - _btn_th) * 0.5;
+  gfx_drawstr("↶ UNDO");
+  lmb_down && _ur_hov_u && _ur_avail_u && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+    gmem[KIT_GMEM_CMD] = 80;
+  );
+  _ur_hov_u && _ur_avail_u ? (
+    strcpy(#_ur_tt, "Undo: ");
+    _ur_ti = 0;
+    while(_ur_ti < GS_UNDO_DESC_LEN && gmem[GS_UNDO_DESC + _ur_ti] > 0) (
+      str_setchar(#_ur_tt, strlen(#_ur_tt), gmem[GS_UNDO_DESC + _ur_ti] | 0);
+      _ur_ti += 1;
+    );
+    #tooltip = #_ur_tt;
+  );
+
+  // ── REDO button (green) ──
+  _ur_avail_r = gmem[GS_REDO_AVAIL] > 0;
+  _ur_hov_r = mx >= _redo_bx && mx <= _redo_bx + _redo_bw && my >= _btn_y && my <= _btn_y + _btn_h;
+  _ur_avail_r ? (
+    // Green pill — visually mirrors UNDO's amber
+    gfx_set(0.30, 0.75, 0.45, _ur_hov_r ? 1.0 : 0.80);
+  ) : (
+    gfx_set(0.20, 0.20, 0.22, 0.45);
+  );
+  gfx_rect(_redo_bx, _btn_y, _redo_bw, _btn_h);
+  gfx_set(1, 1, 1, _ur_avail_r ? (_ur_hov_r ? 1.0 : 0.98) : 0.55);
+  gfx_x = _redo_bx + _btn_pad; gfx_y = _btn_y + (_btn_h - _btn_th) * 0.5;
+  gfx_drawstr("↷ REDO");
+  lmb_down && _ur_hov_r && _ur_avail_r && gmem[KIT_GMEM_BRIDGE_ALIVE] > 0 && gmem[KIT_GMEM_CMD] == 0 ? (
+    gmem[KIT_GMEM_CMD] = 81;
+  );
+  _ur_hov_r && _ur_avail_r ? (
+    strcpy(#_ur_tt, "Redo: ");
+    _ur_ti = 0;
+    while(_ur_ti < GS_REDO_DESC_LEN && gmem[GS_REDO_DESC + _ur_ti] > 0) (
+      str_setchar(#_ur_tt, strlen(#_ur_tt), gmem[GS_REDO_DESC + _ur_ti] | 0);
+      _ur_ti += 1;
+    );
+    #tooltip = #_ur_tt;
+  );
+
+  // ── Bridge status indicator (right side of header) ──
+  _bridge_alive = gmem[KIT_GMEM_BRIDGE_ALIVE] > 0;
+  _ind_r = 4;  // dot radius
+  _ind_x = gfx_w - 14;
+  _ind_y = 14;
+  _bridge_alive ? (
+    // Green dot — bridge running
+    gfx_set(0.30, 0.78, 0.45, 0.9);
+    gfx_circle(_ind_x, _ind_y, _ind_r, 1);
+    // Subtle glow
+    gfx_set(0.30, 0.78, 0.45, 0.15);
+    gfx_circle(_ind_x, _ind_y, _ind_r + 2, 1);
+  ) : (
+    // Red pulsing dot — bridge not running
+    _pulse = 0.45 + 0.35 * sin(time_precise() * 4.0);
+    gfx_set(0.85, 0.25, 0.20, _pulse);
+    gfx_circle(_ind_x, _ind_y, _ind_r, 1);
+  );
+  // Label next to dot
+  gfx_setfont(1, "Arial", 10, 'b');
+  _bridge_alive ? (
+    gfx_set(0.30, 0.78, 0.45, 0.95);
+    gfx_measurestr("BRIDGE", _tw_b, _th_b);
+    gfx_x = _ind_x - _tw_b - 6; gfx_y = _ind_y - _th_b * 0.5;
+    gfx_drawstr("BRIDGE");
+  ) : (
+    gfx_set(0.95, 0.30, 0.25, 1.0);
+    gfx_measurestr("NO BRIDGE", _tw_b, _th_b);
+    gfx_x = _ind_x - _tw_b - 6; gfx_y = _ind_y - _th_b * 0.5;
+    gfx_drawstr("NO BRIDGE");
+  );
+
+  // ── UPDATE button (left of bridge label, only when update available) ──
+  _upd_state = gmem[GS_UPDATE_STATE];
+  _upd_state == 3 ? (
+    // Pulse alpha for attention
+    update_dot_alpha += 0.02 * update_dot_dir;
+    update_dot_alpha >= 1.0 ? ( update_dot_alpha = 1.0; update_dot_dir = -1; );
+    update_dot_alpha <= 0.5 ? ( update_dot_alpha = 0.5; update_dot_dir =  1; );
+
+    // Measure button text
+    gfx_setfont(1, "Arial", 9, 'b');
+    gfx_measurestr("UPDATE", _upd_tw, _upd_th);
+    _upd_pad = 6;
+    _upd_bw = _upd_tw + _upd_pad * 2;
+    _upd_bh = 16;
+    _upd_bx = _ind_x - _tw_b - 12 - _upd_bw;
+    _upd_by = 14 - (_upd_bh * 0.5);
+
+    // Hover detection
+    _upd_hover = mx >= _upd_bx && mx <= _upd_bx + _upd_bw &&
+                 my >= _upd_by && my <= _upd_by + _upd_bh;
+
+    // Button background — EON red with pulse
+    _upd_hover ? (
+      gfx_set(0.95, 0.30, 0.18, update_dot_alpha);
+    ) : (
+      gfx_set(0.85, 0.20, 0.11, update_dot_alpha * 0.85);
+    );
+    gfx_rect(_upd_bx, _upd_by, _upd_bw, _upd_bh);
+
+    // Button border (subtle)
+    gfx_set(1, 0.4, 0.3, update_dot_alpha * 0.3);
+    gfx_rect(_upd_bx, _upd_by, _upd_bw, 1);                  // top
+    gfx_rect(_upd_bx, _upd_by + _upd_bh - 1, _upd_bw, 1);    // bottom
+    gfx_rect(_upd_bx, _upd_by, 1, _upd_bh);                  // left
+    gfx_rect(_upd_bx + _upd_bw - 1, _upd_by, 1, _upd_bh);    // right
+
+    // Button label
+    gfx_set(1, 1, 1, update_dot_alpha);
+    gfx_x = _upd_bx + _upd_pad; gfx_y = _upd_by + (_upd_bh - _upd_th) * 0.5;
+    gfx_drawstr("UPDATE");
+
+    // Click handler — tell Lua to open download URL
+    lmb_down && _upd_hover ? (
+      gmem[GS_UPDATE_REQUEST] = 2;
+    );
+  );
+);
+
+// ─── Browser sync — write window size + dirty UI state to gmem ──────────
+// Runs every @gfx frame (called from Swing_ReaKit.jsfx). Window size + pad
+// request consumption + per-pad layer count always run; kit name / audio
+// lengths / colors / pad names only re-write when their dirty flags are set
+// (browser is the consumer; flags are raised by the operations that mutate
+// the underlying state — kit load, color rebuild, pad rename, etc.).
+function swing_browser_sync_gmem_writes()
+local(_pad_req, _knl, _ki, _cn, _cnl, _cj)
+(
+  // Multi-instance gate: only the browser-bound instance writes shared
+  // state, otherwise two instances' window sizes/colors/names race for
+  // the same gmem slots and the browser flickers.
+  //
+  // We deliberately do NOT use the *_gmem_dirty inner gates anymore: when
+  // the user switches active instance via the browser picker, the new
+  // active instance's dirty flags would be 0 (no kit-mutating event has
+  // happened on it), so the browser title would keep showing the previous
+  // instance's kit name until something changed. Writing every frame is
+  // cheap (~300 gmem writes/frame, < 20k/sec at 60fps) and guarantees the
+  // browser shows the correct kit_name / audiolen / colors / pad names
+  // for whichever instance is currently the browser target.
+  _is_browser_target() ? (
+  gmem[GS_WINDOW_W] = gfx_w;
+  gmem[GS_WINDOW_H] = gfx_h;
+  // Check if browser requested a pad change
+  _pad_req = gmem[GS_PAD_SELECT_REQ] | 0;
+  _pad_req >= 0 && _pad_req < NUM_PADS ? (
+    sel_pad = _pad_req;
+    gmem[GS_PAD_SELECT_REQ] = -1;  // consume the request
+  );
+  // Kit name — written every frame (no inner dirty gate)
+  _knl = strlen(#kit_name);
+  _ki = 0; loop(16,
+    gmem[GS_KIT_NAME_BASE + _ki] = _ki < _knl ? str_getchar(#kit_name, _ki) : 0;
+    _ki += 1;
+  );
+  // Pad audio lengths — written every frame. Non-layered pads write the
+  // ACTUAL interleaved sample count (s_len) so the bridge can read pad audio
+  // out of gmem in stream_gmem_pcm_to_file() (Choppa-applied pads with no
+  // disk source). Layered pads use disk-source streaming in write_kit_v4
+  // so a sentinel "1" is sufficient — exact length doesn't matter for them,
+  // only that empty-kit detection sees a non-zero. Previously this wrote
+  // pad_has_audio() (binary 0/1) every frame, which raced the bridge's
+  // own writes and silently corrupted Choppa kit saves to ~1 sample/pad.
+  _ki = 0; loop(NUM_PADS,
+    gmem[KIT_GMEM_AUDIOLEN + _ki] =
+      s_len[_ki] > 0 ? s_len[_ki] :
+      (pad_has_audio(_ki) ? 1 : 0);
+    _ki += 1;
+  );
+  // ── REVERSE-DIRECTION COLOR SYNC (TCP recolor → p_color) ──
+  // Best-effort: only fires when auto-color mode is OFF, because the
+  // forward flush below would otherwise wipe a bridge-written reverse
+  // value with col_auto_hue (which is derived from pad name, not
+  // user-set). In OFF mode p_color IS the source of truth, so the
+  // reverse direction can update it.
+  col_auto_mode_id == 0 ? (
+    _ki = 0; loop(NUM_PADS,
+      _gh = gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 12];
+      // Tolerance 0.005 (~1.8° hue) — below visible threshold
+      abs(_gh - p_color[_ki]) > 0.005 ? (
+        p_color[_ki] = _gh;
+        col_dirty = 1;
+      );
+      _ki += 1;
+    );
+  );
+  // Pad colors — written every frame. Match what the GUI is currently
+  // displaying: in auto-color mode (col_auto_mode_id > 0), the JSFX shows
+  // col_auto_hue[i] (e.g. kick=red, snare=yellow per drum-type heuristic),
+  // so write THAT to gmem — otherwise the browser and multi-out tracks
+  // would show the underlying manual p_color values instead of the auto-
+  // color the user is actually seeing on the pad grid.
+  _ki = 0; loop(NUM_PADS,
+    gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 12] =
+      col_auto_mode_id > 0 ? col_auto_hue[_ki] : p_color[_ki];
+    _ki += 1;
+  );
+  // Broadcast the effective saturation × intensity and lightness so the
+  // browser and bridge-driven multi-out track sync match the GUI when the
+  // user changes the intensity dial or theme. Recomputing here so we don't
+  // depend on swing_color_rebuild() having run since the last theme/
+  // intensity change.
+  swing_color_get_theme_sl(col_theme_id);
+  gmem[GS_COL_EFFECTIVE_S] = _sc_s * col_intensity;
+  gmem[GS_COL_EFFECTIVE_L] = _sc_l;
+  // Pad names — written every frame, EXCEPT when something else is
+  // currently writing into KIT_GMEM_PADNAMES that we'd otherwise clobber:
+  //   kit_busy — a kit import is in progress. The bridge writes pad names
+  //              to gmem early in the load, then spends many ms writing
+  //              audio data while CMD is still 2. Without this gate, the
+  //              forward sync overwrites kit names with stale cname during
+  //              that audio-write window.
+  //   CMD  3  — bridge finished writing kit data; import hasn't read yet.
+  //   CMD 50  — bridge is showing the rename dialog.
+  //   CMD 51  — bridge wrote the NEW name from rename dialog.
+  //   CMD 63  — browser is mid single-pad sample load.
+  //   CMD 64  — browser is mid layer sample load.
+  !kit_busy &&
+  gmem[KIT_GMEM_CMD] != 3 &&
+  gmem[KIT_GMEM_CMD] != 50 && gmem[KIT_GMEM_CMD] != 51 &&
+  gmem[KIT_GMEM_CMD] != 63 && gmem[KIT_GMEM_CMD] != 64 ? (
+    // ── REVERSE-DIRECTION NAME SYNC (TCP rename → JSFX cname) ──
+    // Before writing local cname → gmem, check if the BRIDGE has written
+    // a different name into gmem (because the user renamed a multi-out
+    // track in REAPER's TCP). If so, copy gmem → local cname and mark
+    // the pad dirty. The forward write below then writes the same value
+    // back to gmem — converges in one frame, no oscillation.
+    _ki = 0; loop(NUM_PADS,
+      _cn = get_cname_slot(_ki);
+      _cnl = strlen(_cn);
+      // Compare first 16 bytes of gmem vs local
+      _diff = 0;
+      _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+        _gc = gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+        _lc = _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+        _gc != _lc ? _diff = 1;
+        _cj += 1;
+      );
+      _diff ? (
+        // gmem has a different name — copy it into local cname.
+        str_setlen(_cn, 0);
+        _cj = 0; _cnl = 0;
+        loop(KIT_GMEM_PADNAME_LEN,
+          _gc = gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] | 0;
+          _gc > 0 ? ( str_setchar(_cn, _cj, _gc); _cnl = _cj + 1; );
+          _cj += 1;
+        );
+        str_setlen(_cn, _cnl);
+        mark_dirty_pad(_ki);
+        col_dirty = 1; // re-derive auto-color from TCP rename
+      );
+      _ki += 1;
+    );
+
+    // ── FORWARD-DIRECTION NAME SYNC (JSFX cname → gmem) ──
+    // After the reverse-direction check, local cname is up to date. Now
+    // mirror it to gmem so the browser sees the latest names (its
+    // per-frame read_pad_name() picks them up immediately).
+    _ki = 0; loop(NUM_PADS,
+      _cn = get_cname_slot(_ki);
+      _cnl = strlen(_cn);
+      _cj = 0; loop(KIT_GMEM_PADNAME_LEN,
+        gmem[KIT_GMEM_PADNAMES + _ki * KIT_GMEM_PADNAME_LEN + _cj] =
+          _cj < _cnl ? str_getchar(_cn, _cj) : 0;
+        _cj += 1;
+      );
+      _ki += 1;
+    );
+  );
+  // Write layer counts to gmem so browser can show "+ LAYER N/4" button
+  // updating live as layers are added. Offset +32 matches the kit-format
+  // slot the browser's core.get_pad_layer_count() reads (rk_lua_core.lua:
+  // 234) AND matches the export/import path at lines 184 / 376. The
+  // earlier offset +13 was a copy-paste typo that landed in the same
+  // slot the kit-format reserves for p_choke during export — meaning
+  // the browser never saw layer-count updates because it was reading
+  // the right slot but the live sync was writing to the wrong one.
+  _ki = 0; loop(NUM_PADS,
+    gmem[KIT_GMEM_META + _ki * KIT_GMEM_META_PP + 32] = p_layer_cnt[_ki];
+    _ki += 1;
+  );
+  );  // _is_browser_target gate
+);
+
+function swing_ui_calc_layout() (
+  left_w = (gfx_w * 0.38)|0;
+  right_x = left_w;
+  right_w = gfx_w - left_w;
+  left_x = 0;
+  left_y = 28;
+  left_h = gfx_h - 28;
+);
+
+function swing_ui_draw_lcd_frame() (
+  LCD_H = 130;
+  lcd_x = 4;
+  lcd_y = left_y + 4;
+  lcd_w = left_w - 8;
+  lcd_h = LCD_H;
+
+  // LCD background (dark blue-green)
+  gfx_set(lcd_bg_r, lcd_bg_g, lcd_bg_b, 1);
+  gfx_rect(lcd_x, lcd_y, lcd_w, lcd_h);
+
+  // LCD border - stronger inset effect
+  // Top/left highlight (lighter, for raised edge illusion)
+  gfx_set(0.15, 0.25, 0.32, 0.8);
+  gfx_rect(lcd_x, lcd_y, lcd_w, 1);
+  gfx_rect(lcd_x, lcd_y, 1, lcd_h);
+  // Bottom/right shadow (darker, for recessed edge)
+  gfx_set(0.02, 0.08, 0.12, 1);
+  gfx_rect(lcd_x, lcd_y + lcd_h - 1, lcd_w, 1);
+  gfx_rect(lcd_x + lcd_w - 1, lcd_y, 1, lcd_h);
+
+  // Subtle scanline effect (very low alpha LCD texture)
+  _scan_y = lcd_y + 1;
+  loop((lcd_h - 2),
+    _scan_y % 2 == 0 ? (
+      gfx_set(0, 0, 0, 0.03);
+      gfx_rect(lcd_x + 1, _scan_y, lcd_w - 2, 1);
+    );
+    _scan_y += 1;
+  );
+
+  // LCD mode tabs: EQ | DLY | RVB | MIX | COMP
+  _num_tabs = 5;
+  _tab_w = ((lcd_w - 4 - (_num_tabs - 1) * 2) / _num_tabs)|0;
+  _tab_h = 14; _tab_y = lcd_y + 2;
+  _tab_x0 = lcd_x + 2;
+  // Init lcd_mode if not set — default to MIX tab
+  lcd_mode == 0 && !lcd_mode_init ? ( lcd_mode = 4; lcd_mode_init = 1; );
+  // Remap legacy modes (6+ → clamp to COMP=5)
+  lcd_mode >= 6 ? lcd_mode = 5;
+
+  // Draw tabs with 3D button effect
+  _ti = 0;
+  loop(_num_tabs,
+    _tx = _tab_x0 + _ti * (_tab_w + 2);
+    // Tab visual order: EQ, DLY, RVB, COMP, MIX → lcd_mode: 1, 2, 3, 5, 4
+    _tab_mode = _ti < 3 ? (_ti + 1) : (_ti == 3 ? 5 : 4);
+    _tab_active = (lcd_mode == _tab_mode);
+
+    // Tab background
+    _tab_active ? gfx_set(lcd_tx_r * 0.4, lcd_tx_g * 0.4, lcd_tx_b * 0.4, 0.9)
+                : gfx_set(0.06, 0.18, 0.24, 0.6);
+    gfx_rect(_tx, _tab_y, _tab_w, _tab_h);
+
+    // Tab 3D bevel
+    gfx_set(1, 1, 1, 0.15);
+    gfx_rect(_tx, _tab_y, _tab_w, 1);  // top highlight
+    gfx_set(0, 0, 0, 0.20);
+    gfx_rect(_tx, _tab_y + _tab_h - 1, _tab_w, 1);  // bottom shadow
+
+    // Active tab subtle glow
+    _tab_active ? (
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.15);
+      gfx_rect(_tx + 1, _tab_y + 1, _tab_w - 2, _tab_h - 2, 0);  // inset glow ring
+    );
+
+    gfx_setfont(1, "Arial", 8, 'b');
+    _tab_active ? (
+      gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 1);
+    ) : (
+      gfx_set(lcd_tx_r * 0.5, lcd_tx_g * 0.5, lcd_tx_b * 0.5, 0.6);
+    );
+    _ti == 0 ? strcpy(#_tlab, "EQ") :
+    _ti == 1 ? strcpy(#_tlab, "DLY") :
+    _ti == 2 ? strcpy(#_tlab, "RVB") :
+    _ti == 3 ? strcpy(#_tlab, "COMP") :
+               strcpy(#_tlab, "MIX");
+    gfx_measurestr(#_tlab, tw, th);
+    gfx_x = _tx + (_tab_w - tw) / 2; gfx_y = _tab_y + (_tab_h - th) / 2;
+    gfx_drawstr(#_tlab);
+
+    // Tab click
+    mx >= _tx && mx <= _tx + _tab_w && my >= _tab_y && my <= _tab_y + _tab_h && lmb_down ? (
+      lcd_mode = _tab_mode;
+    );
+    _ti += 1;
+  );
+
+  // ── Kit busy overlay (progress indicator) ──
+  kit_busy ? (
+    gfx_set(0, 0, 0, 0.65);
+    gfx_rect(lcd_x, lcd_y + 18, lcd_w, lcd_h - 18);
+    gfx_setfont(1, "Arial", 12, 'b');
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 1);
+    kit_export_state == 10 ? strcpy(#_kit_msg, "Enter Kit Name...") :
+    kit_export_state > 0   ? strcpy(#_kit_msg, "Saving Kit...") :
+    kit_import_state == 1  ? strcpy(#_kit_msg, "Select Kit...") :
+    kit_import_state > 0   ? strcpy(#_kit_msg, "Loading Kit...") :
+                             strcpy(#_kit_msg, "Please wait...");
+    gfx_measurestr(#_kit_msg, tw, th);
+    gfx_x = lcd_x + (lcd_w - tw) / 2; gfx_y = lcd_y + (lcd_h - th) / 2 - 8;
+    gfx_drawstr(#_kit_msg);
+    // Progress bar (only show during audio copy phases)
+    kit_total_audio > 0 ? (
+      _prog = kit_copied_audio / kit_total_audio;
+    ) : _prog = 0;
+    kit_export_state == 3 || kit_import_state == 1 ? _prog = 1;
+    kit_export_state == 10 || kit_export_state == 1 ? _prog = 0;
+    _pb_w = lcd_w - 40; _pb_h = 6;
+    _pb_x = lcd_x + 20; _pb_y = lcd_y + (lcd_h + th) / 2;
+    gfx_set(0.15, 0.15, 0.18, 1);
+    gfx_rect(_pb_x, _pb_y, _pb_w, _pb_h);
+    gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.9);
+    gfx_rect(_pb_x, _pb_y, (_pb_w * _prog)|0, _pb_h);
+  );
+
+  // ── LCD-area warning overlays (mutually exclusive). Rendering and
+  // click-detection live in rk_swing_warnings.jsfx-inc. This file just
+  // gates each banner on its specific condition and handles dismissal.
+  //
+  //   1. Bridge not running — kit_bridge_warn flag OR BRIDGE_ALIVE==0
+  //      (the second condition keeps it visible on fresh ReaPack
+  //      installs until the user runs Swing_Kit_Bridge.lua once).
+  //   2. ReaImGui not installed — set by Swing_Browser.lua's early-
+  //      return guard; cleared when ReaImGui is found.
+  //   3. First-run welcome — only on a fresh empty-pads instance,
+  //      dismissable per-instance via _welcome_dismissed (ser_ver 42).
+  (kit_bridge_warn || gmem[KIT_GMEM_BRIDGE_ALIVE] == 0) ? (
+    swing_warning_overlay("Kit Bridge not running!",
+                          "Run Swing_Kit_Bridge.lua in Actions",
+                          0.95, 0.40, 0.30) ? kit_bridge_warn = 0;
+  ) :
+  gmem[GS_REAIMGUI_MISSING] == 1 ? (
+    swing_warning_overlay("ReaImGui not installed",
+                          "Install via ReaPack to enable the browser",
+                          0.95, 0.65, 0.30) ? gmem[GS_REAIMGUI_MISSING] = 0;
+  ) :
+  !_welcome_dismissed ? (
+    _wel_empty = 1;
+    _wel_i = 0; loop(NUM_PADS,
+      pad_has_audio(_wel_i) ? _wel_empty = 0;
+      _wel_i += 1;
+    );
+    _wel_empty ? (
+      swing_warning_overlay("Welcome to Swing!",
+                            "Drag samples to pads or click LOAD for a kit",
+                            0.40, 0.65, 0.95) ?
+        ( _welcome_dismissed = 1; mark_dirty(); );
+    );
+  );
+
+  // LCD content area
+  _lcd_cx = lcd_x + 4;
+  _lcd_cy = lcd_y + 18;
+  _lcd_cw = lcd_w - 8;
+  _lcd_ch = max(10, lcd_h - 22);
+  _lcd_mid_y = _lcd_cy + _lcd_ch / 2;
+);

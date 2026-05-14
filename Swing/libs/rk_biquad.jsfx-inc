@@ -1,0 +1,333 @@
+// rk_biquad.jsfx-inc — Biquad (2nd-order IIR) filter library for DrumKit_ReaKit
+// (c) EON Studios — All Rights Reserved
+//
+// Provides RBJ Audio EQ Cookbook biquad filters:
+//   - Low shelf, high shelf, peaking EQ
+//   - Highpass, lowpass (2nd-order Butterworth-style)
+//
+// Memory layout per filter: 5 coefficients (b0,b1,b2,a1,a2) + 4 state (x1,x2,y1,y2) = 9 slots
+// For stereo: 9 + 4 (extra y1R,y2R,x1R,x2R) = 13 slots total per stereo filter
+//
+// Usage:
+//   bq_mem = freemem; freemem += BQ_STEREO_SIZE;  // allocate per filter
+//   bq_set_peaking(bq_mem, freq, gain_db, Q);     // configure
+//   out = bq_process_L(bq_mem, input);             // process left
+//   out = bq_process_R(bq_mem, input);             // process right
+
+@init
+
+BQ_SIZE        = 9;   // mono biquad: b0,b1,b2,a1,a2 + x1,x2,y1,y2
+BQ_STEREO_SIZE = 13;  // stereo biquad: 5 coeffs + 4 stateL + 4 stateR
+
+// Coefficient offsets (shared L/R)
+BQ_B0 = 0;
+BQ_B1 = 1;
+BQ_B2 = 2;
+BQ_A1 = 3;
+BQ_A2 = 4;
+
+// State offsets — Left channel
+BQ_X1L = 5;
+BQ_X2L = 6;
+BQ_Y1L = 7;
+BQ_Y2L = 8;
+
+// State offsets — Right channel
+BQ_X1R = 9;
+BQ_X2R = 10;
+BQ_Y1R = 11;
+BQ_Y2R = 12;
+
+// ─── Set coefficients: Peaking EQ ──────────────────────────────────────
+// freq = center frequency (Hz), gain_db = boost/cut, Q = bandwidth
+function bq_set_peaking(bq, freq, gain_db, Q)
+local(A, w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);  // sqrt of linear gain
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+
+  b0 = 1.0 + alpha * A;
+  b1 = -2.0 * cosw;
+  b2 = 1.0 - alpha * A;
+  a0 = 1.0 + alpha / A;
+  a1 = -2.0 * cosw;
+  a2 = 1.0 - alpha / A;
+
+  // Normalize by a0
+  bq[BQ_B0] = b0 / a0;
+  bq[BQ_B1] = b1 / a0;
+  bq[BQ_B2] = b2 / a0;
+  bq[BQ_A1] = a1 / a0;
+  bq[BQ_A2] = a2 / a0;
+);
+
+// ─── Set coefficients: Low Shelf ───────────────────────────────────────
+// freq = shelf frequency, gain_db = boost/cut, S = shelf slope (0.5–2, 1 = standard)
+function bq_set_lowshelf(bq, freq, gain_db, S)
+local(A, w0, sinw, cosw, alpha, sqA, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / max(0.1, S) - 1.0) + 2.0);
+  sqA   = 2.0 * sqrt(A) * alpha;
+
+  b0 =     A * ((A + 1.0) - (A - 1.0) * cosw + sqA);
+  b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosw);
+  b2 =     A * ((A + 1.0) - (A - 1.0) * cosw - sqA);
+  a0 =          (A + 1.0) + (A - 1.0) * cosw + sqA;
+  a1 =    -2.0 * ((A - 1.0) + (A + 1.0) * cosw);
+  a2 =          (A + 1.0) + (A - 1.0) * cosw - sqA;
+
+  bq[BQ_B0] = b0 / a0;
+  bq[BQ_B1] = b1 / a0;
+  bq[BQ_B2] = b2 / a0;
+  bq[BQ_A1] = a1 / a0;
+  bq[BQ_A2] = a2 / a0;
+);
+
+// ─── Set coefficients: High Shelf ──────────────────────────────────────
+function bq_set_highshelf(bq, freq, gain_db, S)
+local(A, w0, sinw, cosw, alpha, sqA, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / max(0.1, S) - 1.0) + 2.0);
+  sqA   = 2.0 * sqrt(A) * alpha;
+
+  b0 =     A * ((A + 1.0) + (A - 1.0) * cosw + sqA);
+  b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw);
+  b2 =     A * ((A + 1.0) + (A - 1.0) * cosw - sqA);
+  a0 =          (A + 1.0) - (A - 1.0) * cosw + sqA;
+  a1 =     2.0 * ((A - 1.0) - (A + 1.0) * cosw);
+  a2 =          (A + 1.0) - (A - 1.0) * cosw - sqA;
+
+  bq[BQ_B0] = b0 / a0;
+  bq[BQ_B1] = b1 / a0;
+  bq[BQ_B2] = b2 / a0;
+  bq[BQ_A1] = a1 / a0;
+  bq[BQ_A2] = a2 / a0;
+);
+
+// ─── Set coefficients: Highpass (2nd-order Butterworth, Q=0.707) ──────
+function bq_set_highpass(bq, freq, Q)
+local(w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+
+  b0 =  (1.0 + cosw) / 2.0;
+  b1 = -(1.0 + cosw);
+  b2 =  (1.0 + cosw) / 2.0;
+  a0 =   1.0 + alpha;
+  a1 =  -2.0 * cosw;
+  a2 =   1.0 - alpha;
+
+  bq[BQ_B0] = b0 / a0;
+  bq[BQ_B1] = b1 / a0;
+  bq[BQ_B2] = b2 / a0;
+  bq[BQ_A1] = a1 / a0;
+  bq[BQ_A2] = a2 / a0;
+);
+
+// ─── Set coefficients: Lowpass (2nd-order Butterworth, Q=0.707) ───────
+function bq_set_lowpass(bq, freq, Q)
+local(w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+
+  b0 =  (1.0 - cosw) / 2.0;
+  b1 =   1.0 - cosw;
+  b2 =  (1.0 - cosw) / 2.0;
+  a0 =   1.0 + alpha;
+  a1 =  -2.0 * cosw;
+  a2 =   1.0 - alpha;
+
+  bq[BQ_B0] = b0 / a0;
+  bq[BQ_B1] = b1 / a0;
+  bq[BQ_B2] = b2 / a0;
+  bq[BQ_A1] = a1 / a0;
+  bq[BQ_A2] = a2 / a0;
+);
+
+// ─── Process left channel sample through biquad ─────────────────────────
+function bq_process_L(bq, x)
+local(y)
+(
+  y = bq[BQ_B0] * x + bq[BQ_B1] * bq[BQ_X1L] + bq[BQ_B2] * bq[BQ_X2L]
+                     - bq[BQ_A1] * bq[BQ_Y1L] - bq[BQ_A2] * bq[BQ_Y2L];
+  // Flush denormals in feedback state
+  abs(y) < 0.0000000001 ? y = 0;
+  bq[BQ_X2L] = bq[BQ_X1L]; bq[BQ_X1L] = x;
+  bq[BQ_Y2L] = bq[BQ_Y1L]; bq[BQ_Y1L] = y;
+  y;
+);
+
+// ─── Process right channel sample through biquad ────────────────────────
+function bq_process_R(bq, x)
+local(y)
+(
+  y = bq[BQ_B0] * x + bq[BQ_B1] * bq[BQ_X1R] + bq[BQ_B2] * bq[BQ_X2R]
+                     - bq[BQ_A1] * bq[BQ_Y1R] - bq[BQ_A2] * bq[BQ_Y2R];
+  // Flush denormals in feedback state
+  abs(y) < 0.0000000001 ? y = 0;
+  bq[BQ_X2R] = bq[BQ_X1R]; bq[BQ_X1R] = x;
+  bq[BQ_Y2R] = bq[BQ_Y1R]; bq[BQ_Y1R] = y;
+  y;
+);
+
+// ─── Reset filter state (call after coefficient change to avoid clicks) ─
+function bq_reset(bq) (
+  bq[BQ_X1L] = 0; bq[BQ_X2L] = 0; bq[BQ_Y1L] = 0; bq[BQ_Y2L] = 0;
+  bq[BQ_X1R] = 0; bq[BQ_X2R] = 0; bq[BQ_Y1R] = 0; bq[BQ_Y2R] = 0;
+);
+
+// ─── Compute magnitude response at given frequency ──────────────────────
+// Returns linear magnitude (not dB). Used for EQ visualizer curve drawing.
+function bq_mag_at(bq, freq)
+local(w, cw, c2w, sw, s2w, b0, b1, b2, a1, a2, num_re, num_im, den_re, den_im, num_mag2, den_mag2)
+(
+  w   = 2.0 * $pi * freq / srate;
+  cw  = cos(w);
+  c2w = cos(2.0 * w);
+  sw  = sin(w);
+  s2w = sin(2.0 * w);
+
+  b0 = bq[BQ_B0]; b1 = bq[BQ_B1]; b2 = bq[BQ_B2];
+  a1 = bq[BQ_A1]; a2 = bq[BQ_A2];
+
+  // H(e^jw) = (b0 + b1*e^-jw + b2*e^-2jw) / (1 + a1*e^-jw + a2*e^-2jw)
+  num_re = b0 + b1 * cw + b2 * c2w;
+  num_im = -(b1 * sw + b2 * s2w);
+  den_re = 1.0 + a1 * cw + a2 * c2w;
+  den_im = -(a1 * sw + a2 * s2w);
+
+  num_mag2 = num_re * num_re + num_im * num_im;
+  den_mag2 = den_re * den_re + den_im * den_im;
+
+  den_mag2 > pow(10, -30) ? sqrt(num_mag2 / den_mag2) : 1.0;
+);
+
+// ─── Compute magnitude in dB from raw coefficients (no array needed) ─────
+// Matches the 4BandEQ pattern: takes coefficients directly, returns dB.
+function bq_mag_db(f, cb0, cb1, cb2, ca1, ca2)
+local(w, cw, c2w, sw, s2w, nr, ni, dr, di, ns, ds)
+(
+  w = 2.0 * $pi * f / srate;
+  cw = cos(w); c2w = cos(2.0 * w);
+  sw = sin(w); s2w = sin(2.0 * w);
+  nr = cb0 + cb1 * cw + cb2 * c2w;
+  ni = -(cb1 * sw + cb2 * s2w);
+  dr = 1.0 + ca1 * cw + ca2 * c2w;
+  di = -(ca1 * sw + ca2 * s2w);
+  ns = nr * nr + ni * ni;
+  ds = dr * dr + di * di;
+  ds < pow(10, -30) ? 0 : 10.0 * log10(max(pow(10, -30), ns) / ds);
+);
+
+// ─── Compute lowshelf coefficients into temp vars ────────────────────────
+// Returns via globals: _tb0, _tb1, _tb2, _ta1, _ta2
+function bq_calc_lowshelf(freq, gain_db, S)
+local(A, w0, sinw, cosw, alpha, sqA, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / max(0.1, S) - 1.0) + 2.0);
+  sqA   = 2.0 * sqrt(A) * alpha;
+  b0 = A * ((A + 1.0) - (A - 1.0) * cosw + sqA);
+  b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosw);
+  b2 = A * ((A + 1.0) - (A - 1.0) * cosw - sqA);
+  a0 = (A + 1.0) + (A - 1.0) * cosw + sqA;
+  a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosw);
+  a2 = (A + 1.0) + (A - 1.0) * cosw - sqA;
+  _tb0 = b0 / a0; _tb1 = b1 / a0; _tb2 = b2 / a0;
+  _ta1 = a1 / a0; _ta2 = a2 / a0;
+);
+
+// ─── Compute highshelf coefficients into temp vars ───────────────────────
+function bq_calc_highshelf(freq, gain_db, S)
+local(A, w0, sinw, cosw, alpha, sqA, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / max(0.1, S) - 1.0) + 2.0);
+  sqA   = 2.0 * sqrt(A) * alpha;
+  b0 = A * ((A + 1.0) + (A - 1.0) * cosw + sqA);
+  b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw);
+  b2 = A * ((A + 1.0) + (A - 1.0) * cosw - sqA);
+  a0 = (A + 1.0) - (A - 1.0) * cosw + sqA;
+  a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosw);
+  a2 = (A + 1.0) - (A - 1.0) * cosw - sqA;
+  _tb0 = b0 / a0; _tb1 = b1 / a0; _tb2 = b2 / a0;
+  _ta1 = a1 / a0; _ta2 = a2 / a0;
+);
+
+// ─── Compute peaking EQ coefficients into temp vars ──────────────────────
+function bq_calc_peaking(freq, gain_db, Q)
+local(A, w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  A     = pow(10.0, gain_db / 40.0);
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+  b0 = 1.0 + alpha * A;
+  b1 = -2.0 * cosw;
+  b2 = 1.0 - alpha * A;
+  a0 = 1.0 + alpha / A;
+  a1 = -2.0 * cosw;
+  a2 = 1.0 - alpha / A;
+  _tb0 = b0 / a0; _tb1 = b1 / a0; _tb2 = b2 / a0;
+  _ta1 = a1 / a0; _ta2 = a2 / a0;
+);
+
+// ─── Compute highpass coefficients into temp vars ────────────────────────
+function bq_calc_highpass(freq, Q)
+local(w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+  b0 = (1.0 + cosw) / 2.0;
+  b1 = -(1.0 + cosw);
+  b2 = (1.0 + cosw) / 2.0;
+  a0 = 1.0 + alpha;
+  a1 = -2.0 * cosw;
+  a2 = 1.0 - alpha;
+  _tb0 = b0 / a0; _tb1 = b1 / a0; _tb2 = b2 / a0;
+  _ta1 = a1 / a0; _ta2 = a2 / a0;
+);
+
+// ─── Compute lowpass coefficients into temp vars ─────────────────────────
+function bq_calc_lowpass(freq, Q)
+local(w0, sinw, cosw, alpha, b0, b1, b2, a0, a1, a2)
+(
+  w0    = 2.0 * $pi * max(20, min(20000, freq)) / srate;
+  sinw  = sin(w0);
+  cosw  = cos(w0);
+  alpha = sinw / (2.0 * max(0.1, Q));
+  b0 = (1.0 - cosw) / 2.0;
+  b1 = 1.0 - cosw;
+  b2 = (1.0 - cosw) / 2.0;
+  a0 = 1.0 + alpha;
+  a1 = -2.0 * cosw;
+  a2 = 1.0 - alpha;
+  _tb0 = b0 / a0; _tb1 = b1 / a0; _tb2 = b2 / a0;
+  _ta1 = a1 / a0; _ta2 = a2 / a0;
+);

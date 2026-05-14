@@ -1,0 +1,274 @@
+// rk_swing_ui_panels_mixer.jsfx-inc
+// Swing LCD mixer: 16-channel volume, pan, delay/reverb sends
+// Extracted from rk_swing_ui_panels.jsfx-inc — zero behavioral change
+// (c) EON Studios — All Rights Reserved
+
+@init
+
+function swing_panels_draw_mixer() (
+    // Guard: skip drawing if LCD content area isn't valid yet
+    _lcd_cw > 20 && _lcd_ch > 20 ? (
+    _mix_bw = max(1, (_lcd_cw - 20) / 16);
+    _mix_sl_h = 5;    // height of each horizontal mini-slider
+    _mix_sl_gap = 1;  // gap between mini-sliders
+    _mix_top_h = _mix_sl_h * 3 + _mix_sl_gap * 2 + 2;  // 3 sliders + gaps + padding
+    _mix_vol_y = _lcd_cy + 12 + _mix_top_h;
+    _mix_vol_h = max(10, _lcd_ch - 18 - _mix_top_h);
+    _mix_ind_y = _lcd_cy + 13;  // top indicator area start
+
+    // Column headers (tiny, left side)
+    gfx_setfont(1, "Arial", 8, 0);
+    gfx_set(0.30, 0.85, 0.45, 0.7);
+    gfx_x = _lcd_cx + 1; gfx_y = _mix_ind_y - 1;  gfx_drawstr("P");
+    gfx_set(0.35, 0.65, 0.90, 0.7);
+    gfx_x = _lcd_cx + 1; gfx_y = _mix_ind_y + _mix_sl_h + _mix_sl_gap - 1;  gfx_drawstr("D");
+    gfx_set(0.55, 0.35, 0.85, 0.7);
+    gfx_x = _lcd_cx + 1; gfx_y = _mix_ind_y + (_mix_sl_h + _mix_sl_gap) * 2 - 1;  gfx_drawstr("R");
+
+    // ── Drag continuations for all 4 types ──
+    // VOL drag (vertical)
+    active_id == 290 ? ( LMB ? (
+      _mix_nv = max(0, min(2.0, (1.0 - (my - _mix_vol_y) / _mix_vol_h) * 2.0));
+      p_gain[_mix_drag_pad] = _mix_nv;
+      s_dirty[_mix_drag_pad] = 1;
+      mark_dirty_pad(pi);
+    ) : active_id = -1; );
+
+    // PAN drag (horizontal)
+    active_id == 291 ? ( LMB ? (
+      _mix_dx = _lcd_cx + 10 + _mix_drag_pad * _mix_bw;
+      _mix_dbw = _mix_bw - 2;
+      p_pan[_mix_drag_pad] = max(-1.0, min(1.0, ((mx - _mix_dx) / _mix_dbw) * 2.0 - 1.0));
+      p_panL[_mix_drag_pad] = 1.0 - max(0.0, p_pan[_mix_drag_pad]);
+      p_panR[_mix_drag_pad] = 1.0 + min(0.0, p_pan[_mix_drag_pad]);
+      mark_dirty_pad(pi);
+    ) : active_id = -1; );
+
+    // DLY send drag (horizontal)
+    active_id == 292 ? ( LMB ? (
+      _mix_dx = _lcd_cx + 10 + _mix_drag_pad * _mix_bw;
+      _mix_dbw = _mix_bw - 2;
+      fx_snd_dly[_mix_drag_pad] = max(0, min(1.0, (mx - _mix_dx) / _mix_dbw));
+      mark_dirty_pad(pi);
+    ) : active_id = -1; );
+
+    // RVB send drag (horizontal)
+    active_id == 293 ? ( LMB ? (
+      _mix_dx = _lcd_cx + 10 + _mix_drag_pad * _mix_bw;
+      _mix_dbw = _mix_bw - 2;
+      fx_snd_rvb[_mix_drag_pad] = max(0, min(1.0, (mx - _mix_dx) / _mix_dbw));
+      mark_dirty_pad(pi);
+    ) : active_id = -1; );
+
+    _mix_i = 0;
+    loop(16,
+      _mix_x = _lcd_cx + 10 + _mix_i * _mix_bw;
+      _mix_bar_w = _mix_bw - 2;
+      // Empty pads grey out the entire strip so it matches the pad grid's
+      // empty-pad appearance.
+      _mix_has_audio = pad_has_audio(_mix_i);
+
+      // ═══ PAN mini-slider (green, horizontal, center-referenced) ═══
+      _pan_sy = _mix_ind_y;
+      _pan_norm = (p_pan[_mix_i] + 1.0) / 2.0;  // 0..1
+      _pan_mid = _mix_x + _mix_bar_w / 2;
+      _pan_px = (_mix_x + _pan_norm * _mix_bar_w)|0;
+      // Background
+      gfx_set(0.12, 0.14, 0.18, 0.6);
+      gfx_rect(_mix_x, _pan_sy, _mix_bar_w, _mix_sl_h);
+      // Center tick
+      gfx_set(0.30, 0.32, 0.35, 0.7);
+      gfx_rect(_pan_mid, _pan_sy, 1, _mix_sl_h);
+      // Fill from center to position
+      _pan_fill_x = min(_pan_mid, _pan_px);
+      _pan_fill_w = abs(_pan_px - _pan_mid);
+      _pan_fill_w > 0 ? (
+        _mix_has_audio ? gfx_set(0.25, 0.70, 0.38, 0.7) : gfx_set(0.42, 0.40, 0.38, 0.55);
+        gfx_rect(_pan_fill_x, _pan_sy, _pan_fill_w, _mix_sl_h);
+      );
+      // Thumb (bright green dot, greyed if empty)
+      _mix_has_audio ? gfx_set(0.30, 0.90, 0.50, 1.0) : gfx_set(0.50, 0.48, 0.46, 0.85);
+      gfx_rect(max(_mix_x, min(_mix_x + _mix_bar_w - 2, _pan_px - 1)), _pan_sy, 3, _mix_sl_h);
+
+      // PAN interaction
+      _in_pan = mx >= _mix_x && mx <= _mix_x + _mix_bar_w && my >= _pan_sy && my <= _pan_sy + _mix_sl_h;
+      _in_pan ? swing_tooltip_check(800 + _mix_i, "Pad pan in mixer view — drag, scroll, or double-click to center.");
+      active_id == -1 && lmb_down && _in_pan ? (
+        _mix_now = time_precise();
+        _mix_dbl_id == (100 + _mix_i) && (_mix_now - _mix_dbl_time) < DBL_CLICK_T ? (
+          p_pan[_mix_i] = 0;
+          p_panL[_mix_i] = 1.0; p_panR[_mix_i] = 1.0;
+          mark_dirty_pad(pi); _mix_dbl_id = -1;
+        ) : (
+          active_id = 291; _mix_drag_pad = _mix_i;
+          p_pan[_mix_i] = max(-1.0, min(1.0, ((mx - _mix_x) / _mix_bar_w) * 2.0 - 1.0));
+          p_panL[_mix_i] = 1.0 - max(0.0, p_pan[_mix_i]);
+          p_panR[_mix_i] = 1.0 + min(0.0, p_pan[_mix_i]);
+          mark_dirty_pad(pi);
+          _mix_dbl_time = _mix_now; _mix_dbl_id = 100 + _mix_i;
+        );
+      );
+      _in_pan && frame_wheel != 0 ? (
+        p_pan[_mix_i] = max(-1.0, min(1.0, p_pan[_mix_i] + frame_wheel * 0.05));
+        p_panL[_mix_i] = 1.0 - max(0.0, p_pan[_mix_i]);
+        p_panR[_mix_i] = 1.0 + min(0.0, p_pan[_mix_i]);
+        mark_dirty_pad(pi);
+      );
+
+      // ═══ DLY send mini-slider (blue, horizontal fill) ═══
+      _dly_sy = _mix_ind_y + _mix_sl_h + _mix_sl_gap;
+      // Background
+      gfx_set(0.08, 0.10, 0.16, 0.6);
+      gfx_rect(_mix_x, _dly_sy, _mix_bar_w, _mix_sl_h);
+      // Fill
+      fx_snd_dly[_mix_i] > 0.005 ? (
+        _dly_fill = max(1, (fx_snd_dly[_mix_i] * _mix_bar_w)|0);
+        _mix_has_audio ? gfx_set(0.30, 0.60, 0.90, 0.85) : gfx_set(0.42, 0.40, 0.38, 0.55);
+        gfx_rect(_mix_x, _dly_sy, _dly_fill, _mix_sl_h);
+        // Thumb (greyed if empty)
+        _mix_has_audio ? gfx_set(0.45, 0.75, 1.0, 1.0) : gfx_set(0.50, 0.48, 0.46, 0.85);
+        gfx_rect(_mix_x + _dly_fill - 1, _dly_sy, 2, _mix_sl_h);
+      );
+
+      // DLY interaction
+      _in_dly = mx >= _mix_x && mx <= _mix_x + _mix_bar_w && my >= _dly_sy && my <= _dly_sy + _mix_sl_h;
+      _in_dly ? swing_tooltip_check(900 + _mix_i, "Pad delay send amount — controls how much of this pad feeds the master delay bus.");
+      active_id == -1 && lmb_down && _in_dly ? (
+        _mix_now = time_precise();
+        _mix_dbl_id == (200 + _mix_i) && (_mix_now - _mix_dbl_time) < DBL_CLICK_T ? (
+          fx_snd_dly[_mix_i] = 0; mark_dirty_pad(pi); _mix_dbl_id = -1;
+        ) : (
+          active_id = 292; _mix_drag_pad = _mix_i;
+          fx_snd_dly[_mix_i] = max(0, min(1.0, (mx - _mix_x) / _mix_bar_w));
+          mark_dirty_pad(pi);
+          _mix_dbl_time = _mix_now; _mix_dbl_id = 200 + _mix_i;
+        );
+      );
+      _in_dly && frame_wheel != 0 ? (
+        fx_snd_dly[_mix_i] = max(0, min(1.0, fx_snd_dly[_mix_i] + frame_wheel * 0.05));
+        mark_dirty_pad(pi);
+      );
+
+      // ═══ RVB send mini-slider (purple, horizontal fill) ═══
+      _rvb_sy = _mix_ind_y + (_mix_sl_h + _mix_sl_gap) * 2;
+      // Background
+      gfx_set(0.10, 0.08, 0.16, 0.6);
+      gfx_rect(_mix_x, _rvb_sy, _mix_bar_w, _mix_sl_h);
+      // Fill
+      fx_snd_rvb[_mix_i] > 0.005 ? (
+        _rvb_fill = max(1, (fx_snd_rvb[_mix_i] * _mix_bar_w)|0);
+        _mix_has_audio ? gfx_set(0.50, 0.30, 0.80, 0.85) : gfx_set(0.42, 0.40, 0.38, 0.55);
+        gfx_rect(_mix_x, _rvb_sy, _rvb_fill, _mix_sl_h);
+        // Thumb (greyed if empty)
+        _mix_has_audio ? gfx_set(0.70, 0.45, 1.0, 1.0) : gfx_set(0.50, 0.48, 0.46, 0.85);
+        gfx_rect(_mix_x + _rvb_fill - 1, _rvb_sy, 2, _mix_sl_h);
+      );
+
+      // RVB interaction
+      _in_rvb = mx >= _mix_x && mx <= _mix_x + _mix_bar_w && my >= _rvb_sy && my <= _rvb_sy + _mix_sl_h;
+      _in_rvb ? swing_tooltip_check(1000 + _mix_i, "Pad reverb send amount — controls how much of this pad feeds the master reverb bus.");
+      active_id == -1 && lmb_down && _in_rvb ? (
+        _mix_now = time_precise();
+        _mix_dbl_id == (300 + _mix_i) && (_mix_now - _mix_dbl_time) < DBL_CLICK_T ? (
+          fx_snd_rvb[_mix_i] = 0; mark_dirty_pad(pi); _mix_dbl_id = -1;
+        ) : (
+          active_id = 293; _mix_drag_pad = _mix_i;
+          fx_snd_rvb[_mix_i] = max(0, min(1.0, (mx - _mix_x) / _mix_bar_w));
+          mark_dirty_pad(pi);
+          _mix_dbl_time = _mix_now; _mix_dbl_id = 300 + _mix_i;
+        );
+      );
+      _in_rvb && frame_wheel != 0 ? (
+        fx_snd_rvb[_mix_i] = max(0, min(1.0, fx_snd_rvb[_mix_i] + frame_wheel * 0.05));
+        mark_dirty_pad(pi);
+      );
+
+      // ═══ Volume bar (main vertical fader) ═══
+      // Background
+      gfx_set(0.06, 0.16, 0.20, 0.6);
+      gfx_rect(_mix_x, _mix_vol_y, _mix_bar_w, _mix_vol_h);
+
+      // Volume level fill — greyed when pad is empty to match pad grid behavior
+      _mix_gain_norm = min(1.0, p_gain[_mix_i] / 2.0);
+      _mix_gain_fill = (_mix_gain_norm * _mix_vol_h)|0;
+      _mix_gain_fill > 0 ? (
+        _cb = _mix_i * 3;
+        _mix_has_audio ? (
+          gfx_set(col_rgba[_cb] * 0.6, col_rgba[_cb+1] * 0.6, col_rgba[_cb+2] * 0.6, 0.65);
+        ) : (
+          gfx_set(0.42, 0.40, 0.38, 0.55);
+        );
+        gfx_rect(_mix_x, _mix_vol_y + _mix_vol_h - _mix_gain_fill, _mix_bar_w, _mix_gain_fill);
+      );
+
+      // Meter overlay (live activity) — only ever non-zero if pad has audio,
+      // but gated explicitly so the colors match the rest of the strip.
+      _mix_meter = min(1.0, max(pad_meterL[_mix_i], pad_meterR[_mix_i]) * p_gain[_mix_i]);
+      _mix_meter_fill = (_mix_meter * _mix_vol_h)|0;
+      _mix_meter_fill > 0 && _mix_has_audio ? (
+        _cb = _mix_i * 3;
+        gfx_set(col_rgba[_cb], col_rgba[_cb+1], col_rgba[_cb+2], 0.95);
+        gfx_rect(_mix_x, _mix_vol_y + _mix_vol_h - _mix_meter_fill, _mix_bar_w, _mix_meter_fill);
+      );
+
+      // Gain line marker
+      _mix_gain_line_y = (_mix_vol_y + _mix_vol_h - _mix_gain_fill)|0;
+      gfx_set(1, 1, 1, 0.7);
+      gfx_rect(_mix_x, _mix_gain_line_y, _mix_bar_w, 1);
+
+      // Mute indicator (red bar)
+      p_mute[_mix_i] ? (
+        gfx_set(0.9, 0.2, 0.2, 0.85);
+        gfx_rect(_mix_x, _mix_vol_y, _mix_bar_w, 2);
+      );
+
+      // Pad name: custom name → sample name → pad number
+      _cn = get_cname_slot(_mix_i);
+      strlen(_cn) == 0 ? _cn = get_name_slot(_mix_i);
+      strlen(_cn) > 0 ? (
+        gfx_setfont(1, "Arial", 9, 'b');
+        gfx_set(lcd_tx_r, lcd_tx_g, lcd_tx_b, 0.95);
+        gfx_measurestr(_cn, tw, th);
+        // Clip name to bar width
+        tw > _mix_bar_w ? (
+          // Truncate: clip to bar width
+          gfx_x = _mix_x; gfx_y = _mix_vol_y + _mix_vol_h + 1;
+          gfx_drawstr(_cn, 0, _mix_x + _mix_bar_w, gfx_y + th + 2);
+        ) : (
+          gfx_x = _mix_x + (_mix_bar_w - tw) / 2; gfx_y = _mix_vol_y + _mix_vol_h + 1;
+          gfx_drawstr(_cn);
+        );
+      ) : (
+        gfx_setfont(1, "Arial", 9, 'b');
+        gfx_set(lcd_tx_r * 0.85, lcd_tx_g * 0.85, lcd_tx_b * 0.85, 0.9);
+        sprintf(#_mn, "%d", _mix_i + 1);
+        gfx_measurestr(#_mn, tw, th);
+        gfx_x = _mix_x + (_mix_bar_w - tw) / 2; gfx_y = _mix_vol_y + _mix_vol_h + 1;
+        gfx_drawstr(#_mn);
+      );
+
+      // VOL interaction
+      _in_mix_bar = mx >= _mix_x && mx <= _mix_x + _mix_bar_w && my >= _mix_vol_y && my <= _mix_vol_y + _mix_vol_h;
+      _in_mix_bar ? swing_tooltip_check(700 + _mix_i, "Pad output volume in mixer view — drag for fine, scroll wheel for coarse, double-click to reset to 0 dB.");
+      active_id == -1 && lmb_down && _in_mix_bar ? (
+        _mix_now = time_precise();
+        _mix_dbl_id == _mix_i && (_mix_now - _mix_dbl_time) < DBL_CLICK_T ? (
+          p_gain[_mix_i] = 1.0; s_dirty[_mix_i] = 1;
+          mark_dirty_pad(pi); _mix_dbl_id = -1;
+        ) : (
+          active_id = 290; _mix_drag_pad = _mix_i;
+          p_gain[_mix_i] = max(0, min(2.0, (1.0 - (my - _mix_vol_y) / _mix_vol_h) * 2.0));
+          s_dirty[_mix_i] = 1; mark_dirty_pad(pi);
+          _mix_dbl_time = _mix_now; _mix_dbl_id = _mix_i;
+        );
+      );
+      _in_mix_bar && frame_wheel != 0 ? (
+        p_gain[_mix_i] = max(0, min(2.0, p_gain[_mix_i] + frame_wheel * 0.05));
+        s_dirty[_mix_i] = 1; mark_dirty_pad(pi);
+      );
+
+      _mix_i += 1;
+    );
+  ); // end _lcd_cw guard
+);
+

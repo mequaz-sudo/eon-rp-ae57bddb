@@ -1,0 +1,118 @@
+// rk_delay.jsfx-inc — Stereo tempo-synced delay for DrumKit_ReaKit
+// (c) EON Studios — All Rights Reserved
+//
+// Shared stereo delay bus with tempo sync, feedback, and feedback filtering.
+// Call dly_init(mem_start) from @init, dly_recalc() from @block,
+// dly_process(inL, inR) from @sample. Returns via dly_outL / dly_outR.
+//
+// Global parameters (set from GUI):
+//   dly_div    — sync division (0=off, 1=1/4, 2=1/8, 3=1/8T, 4=1/16, 5=1/16T, 6=1/32)
+//   dly_fb     — feedback amount (0–0.95)
+//   dly_mix    — wet/dry mix for return (0–1, applied externally)
+//   dly_hpf_hz — feedback HPF cutoff Hz (20–2000)
+//   dly_lpf_hz — feedback LPF cutoff Hz (1000–20000)
+//   dly_ping   — 1 = ping-pong stereo, 0 = straight stereo
+
+@init
+
+// Maximum delay buffer: ~2 seconds at 192kHz (generous for slow tempos)
+DLY_BUF_MAX = 384000;
+
+function dly_init(mem_start)
+(
+  dly_bufL = mem_start;
+  dly_bufR = mem_start + DLY_BUF_MAX;
+  memset(dly_bufL, 0, DLY_BUF_MAX);
+  memset(dly_bufR, 0, DLY_BUF_MAX);
+  dly_wpos = 0;
+  dly_len  = 0;       // delay length in samples (set by dly_recalc)
+  dly_fb_hpf_stL = 0; dly_fb_hpf_stR = 0;
+  dly_fb_lpf_stL = 0; dly_fb_lpf_stR = 0;
+  dly_outL = 0; dly_outR = 0;
+  // Return total memory consumed
+  mem_start + DLY_BUF_MAX * 2;
+);
+
+// ─── Recalculate delay length from tempo + division ──────────────────────
+// Call from @block (tempo may change).
+function dly_recalc()
+local(beat_samples)
+(
+  beat_samples = (60.0 / max(20, tempo)) * srate;
+  // Expanded divisions: straight, triplet (T=*2/3), dotted (D=*1.5)
+  dly_div == 1  ? dly_len = beat_samples :                    // 1/4
+  dly_div == 2  ? dly_len = beat_samples * 2.0 / 3.0 :       // 1/4T
+  dly_div == 3  ? dly_len = beat_samples * 1.5 :              // 1/4D
+  dly_div == 4  ? dly_len = beat_samples * 0.5 :              // 1/8
+  dly_div == 5  ? dly_len = beat_samples * 0.5 * 2.0 / 3.0 : // 1/8T
+  dly_div == 6  ? dly_len = beat_samples * 0.5 * 1.5 :        // 1/8D
+  dly_div == 7  ? dly_len = beat_samples * 0.25 :             // 1/16
+  dly_div == 8  ? dly_len = beat_samples * 0.25 * 2.0 / 3.0 : // 1/16T
+  dly_div == 9  ? dly_len = beat_samples * 0.25 * 1.5 :       // 1/16D
+  dly_div == 10 ? dly_len = beat_samples * 0.125 :            // 1/32
+  dly_div == 11 ? dly_len = beat_samples * 0.125 * 2.0 / 3.0 : // 1/32T
+  dly_div == 12 ? dly_len = beat_samples * 0.125 * 1.5 :      // 1/32D
+  dly_div == 13 ? dly_len = beat_samples * 0.0625 :           // 1/64
+  dly_div == 14 ? dly_len = beat_samples * 0.0625 * 2.0 / 3.0 : // 1/64T
+  dly_div == 15 ? dly_len = beat_samples * 0.0625 * 1.5 :     // 1/64D
+                  dly_len = 0;
+  dly_len = min(dly_len | 0, DLY_BUF_MAX - 1);
+  // Feedback filter coefficients
+  dly_fb_hpf_a = exp(-2.0 * $pi * max(20, dly_hpf_hz) / srate);
+  dly_fb_lpf_a = exp(-2.0 * $pi * min(20000, dly_lpf_hz) / srate);
+);
+
+// ─── Process one sample ──────────────────────────────────────────────────
+// inL/inR = send bus input (accumulated from per-pad sends).
+// After call, dly_outL / dly_outR = wet delay output.
+function dly_process(inL, inR)
+local(rpos, tapL, tapR, fbL, fbR)
+(
+  dly_len > 0 ? (
+    // Read from circular buffer
+    rpos = dly_wpos - dly_len;
+    rpos < 0 ? rpos += DLY_BUF_MAX;
+    tapL = dly_bufL[rpos];
+    tapR = dly_bufR[rpos];
+
+    // Feedback path with filtering (clamp to prevent runaway from corrupt state)
+    fbL = tapL * min(0.95, dly_fb);
+    fbR = tapR * min(0.95, dly_fb);
+
+    // Feedback HPF (remove rumble)
+    dly_hpf_hz > 25 ? (
+      dly_fb_hpf_stL = dly_fb_hpf_a * dly_fb_hpf_stL + (1.0 - dly_fb_hpf_a) * fbL;
+      dly_fb_hpf_stR = dly_fb_hpf_a * dly_fb_hpf_stR + (1.0 - dly_fb_hpf_a) * fbR;
+      fbL -= dly_fb_hpf_stL;
+      fbR -= dly_fb_hpf_stR;
+    );
+
+    // Feedback LPF (darken repeats)
+    dly_lpf_hz < 19500 ? (
+      dly_fb_lpf_stL = dly_fb_lpf_a * dly_fb_lpf_stL + (1.0 - dly_fb_lpf_a) * fbL;
+      dly_fb_lpf_stR = dly_fb_lpf_a * dly_fb_lpf_stR + (1.0 - dly_fb_lpf_a) * fbR;
+      fbL = dly_fb_lpf_stL;
+      fbR = dly_fb_lpf_stR;
+    );
+
+    // Write to buffer: input + filtered feedback
+    // Ping-pong: cross-feed L→R, R→L in feedback
+    dly_ping ? (
+      dly_bufL[dly_wpos] = inL + fbR;  // R feedback feeds L
+      dly_bufR[dly_wpos] = inR + fbL;  // L feedback feeds R
+    ) : (
+      dly_bufL[dly_wpos] = inL + fbL;
+      dly_bufR[dly_wpos] = inR + fbR;
+    );
+
+    // Advance write head
+    dly_wpos += 1;
+    dly_wpos >= DLY_BUF_MAX ? dly_wpos = 0;
+
+    dly_outL = tapL;
+    dly_outR = tapR;
+  ) : (
+    dly_outL = 0;
+    dly_outR = 0;
+  );
+);
