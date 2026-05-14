@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="EON Studios — Swing 2">
+  <metadata>
+    <description><![CDATA[
+EON Studios Swing 2 — 16-pad drum sampler for REAPER.
+
+Includes the Swing JSFX, the Kit Bridge companion script, the sample browser, and four factory drum kits (707, 808, 909, Linn Drum).
+
+ReaImGui is required for the sample browser — install separately from cfillion's repository.
+    ]]></description>
+    <link rel="website">https://eonaudio.pro</link>
+  </metadata>
+
+  <category name="EON/Swing">
+    <reapack name="Swing_ReaKit.jsfx" type="effect" desc="EON Swing 2 — 16-pad drum sampler">
+      <metadata>
+        <description><![CDATA[
+16-pad drum sampler for REAPER with multi-out routing, kit save/load (.swing format), per-pad ADSR/FX/colors, an integrated sample browser, and four factory drum kits.
+
+After install, restart REAPER. The Swing Kit Bridge auto-registers as a startup action on first run; manually launch it once from the Action List ("Swing_Kit_Bridge.lua") to set up auto-start.
+
+Requires ReaImGui for the sample browser (install separately via cfillion's repository).
+        ]]></description>
+        <link rel="website">https://eonaudio.pro</link>
+      </metadata>
+      <version name="2.1.5" author="EON Studios" time="2026-05-14T12:00:00Z">
+        <changelog><![CDATA[
+Pad name widening, cross-thread race fix, empty-pad default color.
+
+- Pad names widened from 16 to 32 characters (gmem layout updated).
+- Fixed pad names not updating after multi-drag or kit load: added
+  kit_busy + CMD gates on @block PADNAME mirror and @gfx sync to
+  prevent cross-thread clobbering during import.
+- Browser sample load (CMD 63/64): direct cname-to-gmem write +
+  immediate auto-color derive for same-frame browser update.
+- Empty pads now show default theme color on multi-out tracks,
+  browser, and mixer (was showing hue-based color on empty pads).
+- Reverb DSP: pre-delay clamping, frozen-tail buffer allocation,
+  coefficient recalc moved out of @sample.
+- 808 auto-load guard: prevents hot-reload from overwriting user kit.
+- Filename categorizer: strip leading digits/underscores for cleaner
+  pad display names.
+        ]]></changelog>
+
+        <!-- Main JSFX -->
+        <source main="effect">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/Swing_ReaKit.jsfx</source>
+
+        <!-- JSFX libs (22 files) -->
+        <source file="libs/knobs_kbsg.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/knobs_kbsg.jsfx-inc</source>
+        <source file="libs/rk_biquad.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_biquad.jsfx-inc</source>
+        <source file="libs/rk_compressor.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_compressor.jsfx-inc</source>
+        <source file="libs/rk_delay.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_delay.jsfx-inc</source>
+        <source file="libs/rk_drumkit_dsp.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_drumkit_dsp.jsfx-inc</source>
+        <source file="libs/rk_drumkit_fx.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_drumkit_fx.jsfx-inc</source>
+        <source file="libs/rk_reverb.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_reverb.jsfx-inc</source>
+        <source file="libs/rk_swing_block.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_block.jsfx-inc</source>
+        <source file="libs/rk_swing_browser_load.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_browser_load.jsfx-inc</source>
+        <source file="libs/rk_swing_colors.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_colors.jsfx-inc</source>
+        <source file="libs/rk_swing_core.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_core.jsfx-inc</source>
+        <source file="libs/rk_swing_defaults.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_defaults.jsfx-inc</source>
+        <source file="libs/rk_swing_lcd.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_lcd.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_grid_overlay.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_grid_overlay.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_grid_overlay_fx.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_grid_overlay_fx.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_grid_pads.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_grid_pads.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_panels_controls.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_panels_controls.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_panels_lcd.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_panels_lcd.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_panels_mixer.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_panels_mixer.jsfx-inc</source>
+        <source file="libs/rk_swing_tooltips.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_tooltips.jsfx-inc</source>
+        <source file="libs/rk_swing_ui_state.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_ui_state.jsfx-inc</source>
+        <source file="libs/rk_swing_warnings.jsfx-inc">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Swing/libs/rk_swing_warnings.jsfx-inc</source>
+
+        <!-- Lua scripts (14 files) — type="script" override sends each to
+             Scripts/<index>/<category>/<file>. file= holds only the filename
+             because the <category name="EON/Swing"> above already provides
+             the EON/Swing/ nesting; including it in file= would double-nest. -->
+        <source type="script" file="EON_SB_ImportKit.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_SB_ImportKit.lua</source>
+        <source type="script" file="EON_SB_LoadAllPads.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_SB_LoadAllPads.lua</source>
+        <source type="script" file="EON_SB_LoadSelectedPads.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_SB_LoadSelectedPads.lua</source>
+        <source type="script" file="EON_SB_NewKit.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_SB_NewKit.lua</source>
+        <source type="script" file="EON_Toggle_Swing_Browser.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_Toggle_Swing_Browser.lua</source>
+        <source type="script" file="EON_UpdateCheck.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/EON_UpdateCheck.lua</source>
+        <source type="script" file="Swing_Browser.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/Swing_Browser.lua</source>
+        <source type="script" file="Swing_Browser_Settings.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/Swing_Browser_Settings.lua</source>
+        <source type="script" file="Swing_Kit_Bridge.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/Swing_Kit_Bridge.lua</source>
+        <source type="script" file="eon_filename_categorizer.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/eon_filename_categorizer.lua</source>
+        <source type="script" file="imgui.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/imgui.lua</source>
+        <source type="script" file="rk_lua_core.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/rk_lua_core.lua</source>
+        <source type="script" file="rk_lua_widgets.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/rk_lua_widgets.lua</source>
+        <source type="script" file="rtk.lua">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Scripts/rtk.lua</source>
+
+        <!-- Factory kits (4 files) — type="data" override redirects to Data/<file> -->
+        <source type="data" file="Swing_Kits/707.swing">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Data/Swing_Kits/707.swing</source>
+        <source type="data" file="Swing_Kits/808_v2.swing">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Data/Swing_Kits/808_v2.swing</source>
+        <source type="data" file="Swing_Kits/909.swing">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Data/Swing_Kits/909.swing</source>
+        <source type="data" file="Swing_Kits/Linn Drum_v2.swing">https://raw.githubusercontent.com/mequaz-sudo/eon-rp-ae57bddb/main/Data/Swing_Kits/Linn%20Drum_v2.swing</source>
+      </version>
+    </reapack>
+  </category>
+</index>
