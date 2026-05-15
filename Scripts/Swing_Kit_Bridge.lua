@@ -4356,7 +4356,23 @@ end
 local function self_register()
   local _, script_path = reaper.get_action_context()
   local key = SCRIPT_NAME .. "_registered_v3"
-  if reaper.GetExtState(SCRIPT_NAME, key) == "1" then return end
+  local marker = "-- EON:" .. SCRIPT_NAME
+
+  -- Check both ExtState AND __startup.lua. If the ExtState says registered
+  -- but __startup.lua is missing or doesn't contain our block, re-register.
+  -- This handles the case where the installer's uninstall step (or anything
+  -- else) deletes/corrupts __startup.lua without clearing the ExtState.
+  if reaper.GetExtState(SCRIPT_NAME, key) == "1" then
+    local res_path = reaper.GetResourcePath()
+    local startup_path = res_path .. "/Scripts/__startup.lua"
+    local fr = io.open(startup_path, "r")
+    if fr then
+      local content = fr:read("*a"); fr:close()
+      if content:find(marker .. " BEGIN", 1, true) then return end  -- genuinely registered
+    end
+    -- ExtState stale: __startup.lua missing or our block is gone. Clear and re-register.
+    reaper.SetExtState(SCRIPT_NAME, key, "", true)
+  end
 
   -- Register in action list (so manual invocation still works)
   local cmd_id = reaper.AddRemoveReaScript(true, 0, script_path, true)

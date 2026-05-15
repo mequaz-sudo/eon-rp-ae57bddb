@@ -23,23 +23,13 @@ Requires ReaImGui for the sample browser (install separately via cfillion's repo
         ]]></description>
         <link rel="website">https://eonaudio.pro</link>
       </metadata>
-      <version name="2.1.5" author="EON Studios" time="2026-05-14T12:00:00Z">
+      <version name="2.1.6" author="EON Studios" time="2026-05-15T12:00:00Z">
         <changelog><![CDATA[
-Pad name widening, cross-thread race fix, empty-pad default color.
+Fix Kit Bridge auto-registration.
 
-- Pad names widened from 16 to 32 characters (gmem layout updated).
-- Fixed pad names not updating after multi-drag or kit load: added
-  kit_busy + CMD gates on @block PADNAME mirror and @gfx sync to
-  prevent cross-thread clobbering during import.
-- Browser sample load (CMD 63/64): direct cname-to-gmem write +
-  immediate auto-color derive for same-frame browser update.
-- Empty pads now show default theme color on multi-out tracks,
-  browser, and mixer (was showing hue-based color on empty pads).
-- Reverb DSP: pre-delay clamping, frozen-tail buffer allocation,
-  coefficient recalc moved out of @sample.
-- 808 auto-load guard: prevents hot-reload from overwriting user kit.
-- Filename categorizer: strip leading digits/underscores for cleaner
-  pad display names.
+- Kit Bridge self_register() now verifies __startup.lua actually
+  contains the bridge block, not just the ExtState flag. Re-registers
+  automatically if the file is missing or the block was stripped.
         ]]></changelog>
 
         <!-- Main JSFX -->
